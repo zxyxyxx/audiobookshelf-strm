@@ -11,6 +11,7 @@ const zipHelpers = require('../utils/zipHelpers')
 const { reqSupportsWebp, clampPositiveInt } = require('../utils/index')
 const { ScanResult, AudioMimeType } = require('../utils/constants')
 const { getAudioMimeTypeFromExtname, encodeUriPath } = require('../utils/fileUtils')
+const { isStrmPath, isUrl, readStrmTarget, proxyRemoteStream, getCloudDirectUrl } = require('../utils/strmUtils')
 const LibraryItemScanner = require('../scanner/LibraryItemScanner')
 const AudioFileScanner = require('../scanner/AudioFileScanner')
 const Scanner = require('../scanner/Scanner')
@@ -988,19 +989,33 @@ class LibraryItemController {
    */
   async getLibraryFile(req, res) {
     const libraryFile = req.libraryFile
+    let filePath = libraryFile.metadata.path
+
+    if (isStrmPath(filePath)) {
+      try {
+        const strmTarget = await readStrmTarget(filePath)
+        if (isUrl(strmTarget)) {
+          return proxyRemoteStream(strmTarget, req, res)
+        }
+        filePath = strmTarget
+      } catch (error) {
+        Logger.error(`[LibraryItemController] Failed to read STRM file "${filePath}"`, error)
+        return res.sendStatus(500)
+      }
+    }
 
     if (global.XAccel) {
-      const encodedURI = encodeUriPath(global.XAccel + libraryFile.metadata.path)
+      const encodedURI = encodeUriPath(global.XAccel + filePath)
       Logger.debug(`Use X-Accel to serve static file ${encodedURI}`)
       return res.status(204).header({ 'X-Accel-Redirect': encodedURI }).send()
     }
 
     // Express does not set the correct mimetype for m4b files so use our defined mimetypes if available
-    const audioMimeType = getAudioMimeTypeFromExtname(Path.extname(libraryFile.metadata.path))
+    const audioMimeType = getAudioMimeTypeFromExtname(Path.extname(filePath))
     if (audioMimeType) {
       res.setHeader('Content-Type', audioMimeType)
     }
-    res.sendFile(libraryFile.metadata.path)
+    res.sendFile(filePath)
   }
 
   /**
