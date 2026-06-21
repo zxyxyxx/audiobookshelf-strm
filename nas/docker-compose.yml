@@ -1,0 +1,35 @@
+# Audiobookshelf STRM 定制版 —— NAS 部署模板
+# 镜像由 GitHub Actions 自动构建并推送到 GHCR（公开，免登录即可拉取）。
+# 官方每发新版，镜像会在数小时内自动更新（机制见 nas/README.md）。
+#
+# 使用：把本文件复制到 NAS，按注释改好路径/IP，然后执行：
+#   docker compose pull && docker compose up -d
+
+services:
+  audiobookshelf-strm:
+    container_name: audiobookshelf-strm
+    image: ghcr.io/2222221029/audiobookshelf-strm:latest   # latest=始终最新；要锁版本可写 :2.35.1
+    ports:
+      - "2048:80"                       # 宿主端口 2048 -> 容器内部 80；按需改左侧
+    environment:
+      - TZ=Asia/Shanghai
+      - STRM_SCAN_PROBE=0               # 扫描时不对音频做 ffprobe 探测（云文件提速）
+      - STRM_SCAN_SKIP_PROBE_PATHS=/CloudNAS   # 这些路径下的文件跳过探测
+      # 云直链映射：把容器内本地路径前缀映射为 HTTP 直链，按你的环境修改 IP/端口
+      - STRM_DIRECT_URL_MAP=/CloudNAS=http://NAS_IP:19798/dav
+    volumes:
+      - ./config:/config                # 配置/数据库（请持久化）
+      - ./metadata:/metadata            # 封面等元数据（请持久化）
+      - /path/to/有声书:/audiobooks:ro   # 你的有声书库目录（只读）
+      - /path/to/CloudNAS:/CloudNAS:rshared   # 云挂载目录（rshared 让容器看到后续挂载）
+    restart: unless-stopped
+
+  # 可选：Watchtower 自动拉取最新镜像并重启容器，实现 NAS 端全自动升级。
+  # 取消下面注释后，每天检查一次 :latest 是否更新；配合上游自动构建即可全链路无人值守。
+  # watchtower:
+  #   image: containrrr/watchtower
+  #   container_name: watchtower
+  #   volumes:
+  #     - /var/run/docker.sock:/var/run/docker.sock
+  #   command: --cleanup --interval 86400 audiobookshelf-strm
+  #   restart: unless-stopped
