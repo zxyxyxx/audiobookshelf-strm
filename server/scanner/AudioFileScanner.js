@@ -7,9 +7,48 @@ const parseNameString = require('../utils/parsers/parseNameString')
 const parseSeriesString = require('../utils/parsers/parseSeriesString')
 const LibraryItem = require('../models/LibraryItem')
 const AudioFile = require('../objects/files/AudioFile')
+const { isStrmPath, isUrl, readStrmTarget, getStrmTargetSize, isProbeSkippedPath, isCloudMountPath } = require('../utils/strmUtils')
 
 class AudioFileScanner {
   constructor() {}
+
+  get shouldProbeStrmTargets() {
+    return process.env.STRM_SCAN_PROBE === '1'
+  }
+
+  get shouldReadStrmUrlSize() {
+    return process.env.STRM_SCAN_URL_SIZE === '1'
+  }
+
+  async waitBeforeStrmProbe() {
+    const delayMs = Number(process.env.STRM_SCAN_PROBE_DELAY_MS || 200)
+    if (delayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs))
+    }
+  }
+
+  setTrackAndDiscNumberFromFilename(audioFile, mediaType, mediaMetadataFromScan, libraryFile) {
+    if (mediaType !== 'book') return
+    const { trackNumber, discNumber } = this.getTrackAndDiscNumberFromFilename(mediaMetadataFromScan, libraryFile)
+    audioFile.trackNumFromFilename = trackNumber
+    audioFile.discNumFromFilename = discNumber
+  }
+
+  async createAudioFileWithoutProbe(mediaType, libraryFile, mediaMetadataFromScan, probePath, strmTarget = null) {
+    const audioFile = new AudioFile()
+    this.setTrackAndDiscNumberFromFilename(audioFile, mediaType, mediaMetadataFromScan, libraryFile)
+
+    // Skip fs.stat for cloud-mounted paths — CloudDrive2 doesn't need to be contacted at all during scan
+    const shouldReadSize = !isCloudMountPath(probePath) && (strmTarget ? this.shouldReadStrmUrlSize || !isUrl(probePath) : !isUrl(probePath))
+    const targetSize = shouldReadSize ? await getStrmTargetSize(probePath) : null
+    audioFile.setDataWithoutProbe(libraryFile, {
+      duration: 0,
+      size: targetSize,
+      format: strmTarget ? 'strm' : null,
+      strmTarget
+    })
+    return audioFile
+  }
 
   /**
    * Is array of numbers sequential, i.e. 1, 2, 3, 4
@@ -153,11 +192,39 @@ class AudioFileScanner {
    * @param {{title:string, subtitle:string, series:string, sequence:string, publishedYear:string, narrators:string}} mediaMetadataFromScan
    * @returns {Promise<AudioFile>}
    */
-  async scan(mediaType, libraryFile, mediaMetadataFromScan) {
-    const probeData = await prober.probe(libraryFile.metadata.path)
+  async scan(mediaType, libraryFile, mediaMetadataFromScan, options = {}) {
+    const forceProbeStrmTargets = options.forceProbeStrmTargets === true
+    const forceProbeSkippedPaths = options.forceProbeSkippedPaths === true
+    let probePath = libraryFile.metadata.path
+    let strmTarget = null
+    if (isStrmPath(libraryFile.metadata.path)) {
+      try {
+        probePath = await readStrmTarget(libraryFile.metadata.path)
+        strmTarget = probePath
+      } catch (error) {
+        Logger.error(`[AudioFileScanner] Invalid STRM file "${libraryFile.metadata.path}": ${error.message}`)
+        return null
+      }
+
+      if (!this.shouldProbeStrmTargets && !forceProbeStrmTargets) {
+        const audioFile = await this.createAudioFileWithoutProbe(mediaType, libraryFile, mediaMetadataFromScan, probePath, strmTarget)
+        Logger.debug(`[AudioFileScanner] Skipped probing STRM target during scan: "${libraryFile.metadata.path}"`)
+        return audioFile
+      }
+
+      await this.waitBeforeStrmProbe()
+    }
+
+    if (!forceProbeSkippedPaths && isProbeSkippedPath(probePath)) {
+      const audioFile = await this.createAudioFileWithoutProbe(mediaType, libraryFile, mediaMetadataFromScan, probePath, strmTarget)
+      Logger.debug(`[AudioFileScanner] Skipped probing configured path during scan: "${probePath}"`)
+      return audioFile
+    }
+
+    const probeData = await prober.probe(probePath)
 
     if (probeData.error) {
-      Logger.error(`[AudioFileScanner] ${probeData.error} : "${libraryFile.metadata.path}"`)
+      Logger.error(`[AudioFileScanner] ${probeData.error} : "${probePath}"`)
       return null
     }
 
@@ -169,11 +236,7 @@ class AudioFileScanner {
     const audioFile = new AudioFile()
     audioFile.trackNumFromMeta = probeData.audioMetaTags.trackNumber
     audioFile.discNumFromMeta = probeData.audioMetaTags.discNumber
-    if (mediaType === 'book') {
-      const { trackNumber, discNumber } = this.getTrackAndDiscNumberFromFilename(mediaMetadataFromScan, libraryFile)
-      audioFile.trackNumFromFilename = trackNumber
-      audioFile.discNumFromFilename = discNumber
-    }
+    this.setTrackAndDiscNumberFromFilename(audioFile, mediaType, mediaMetadataFromScan, libraryFile)
     audioFile.setDataFromProbe(libraryFile, probeData)
 
     return audioFile
@@ -186,13 +249,13 @@ class AudioFileScanner {
    * @param {LibraryItem.LibraryFileObject[]} audioLibraryFiles
    * @returns {Promise<AudioFile[]>}
    */
-  async executeMediaFileScans(mediaType, libraryItemScanData, audioLibraryFiles) {
+  async executeMediaFileScans(mediaType, libraryItemScanData, audioLibraryFiles, options = {}) {
     const batchSize = 32
     const results = []
     for (let batch = 0; batch < audioLibraryFiles.length; batch += batchSize) {
       const proms = []
       for (let i = batch; i < Math.min(batch + batchSize, audioLibraryFiles.length); i++) {
-        proms.push(this.scan(mediaType, audioLibraryFiles[i], libraryItemScanData.mediaMetadata))
+        proms.push(this.scan(mediaType, audioLibraryFiles[i], libraryItemScanData.mediaMetadata, options))
       }
       results.push(...(await Promise.all(proms).then((scanResults) => scanResults.filter((sr) => sr))))
     }
