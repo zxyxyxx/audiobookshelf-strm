@@ -4,7 +4,7 @@ set -o pipefail
 
 DEFAULT_DATA_DIR="/usr/share/audiobookshelf"
 CONFIG_PATH="/etc/default/audiobookshelf"
-DEFAULT_PORT=13378
+DEFAULT_PORT=2048
 DEFAULT_HOST="0.0.0.0"
 
 add_user() {

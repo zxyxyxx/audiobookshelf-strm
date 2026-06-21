@@ -4,6 +4,7 @@ const Logger = require('../Logger')
 const Database = require('../Database')
 const { toNumber, isUUID } = require('../utils/index')
 const { getAudioMimeTypeFromExtname, encodeUriPath } = require('../utils/fileUtils')
+const { isStrmPath, isUrl, readStrmTarget, proxyRemoteStream, getCloudDirectUrl } = require('../utils/strmUtils')
 const { PlayMethod } = require('../utils/constants')
 
 const ShareManager = require('../managers/ShareManager')
@@ -152,6 +153,7 @@ class SessionController {
   async getOpenSession(req, res) {
     const libraryItem = await Database.libraryItemModel.getExpandedById(req.playbackSession.libraryItemId)
     const sessionForClient = req.playbackSession.toJSONForClient(libraryItem)
+    await this.playbackSessionManager.resolveStrmPathsForClient(sessionForClient)
     res.json(sessionForClient)
   }
 
@@ -315,18 +317,39 @@ class SessionController {
     const user = await Database.userModel.getUserById(playbackSession.userId)
     Logger.debug(`[SessionController] Serving audio track ${audioTrack.index} for session "${req.params.id}" belonging to user "${user.username}"`)
 
+    let audioTrackPath = audioTrack.metadata.path
+    if (isUrl(audioTrackPath)) {
+      return proxyRemoteStream(audioTrackPath, req, res)
+    }
+    if (isStrmPath(audioTrackPath)) {
+      try {
+        const strmTarget = await readStrmTarget(audioTrackPath)
+        if (isUrl(strmTarget)) {
+          return proxyRemoteStream(strmTarget, req, res)
+        }
+        audioTrackPath = strmTarget
+      } catch (error) {
+        Logger.error(`[SessionController] Failed to read STRM file "${audioTrackPath}"`, error)
+        return res.sendStatus(500)
+      }
+    }
+
+    // Cloud-mounted files fall through to res.sendFile below.
+    // Express handles Range requests natively — only the bytes the client plays are read via FUSE.
+    // No ffmpeg transcoding, no full-file download.
+
     if (global.XAccel) {
-      const encodedURI = encodeUriPath(global.XAccel + audioTrack.metadata.path)
+      const encodedURI = encodeUriPath(global.XAccel + audioTrackPath)
       Logger.debug(`Use X-Accel to serve static file ${encodedURI}`)
       return res.status(204).header({ 'X-Accel-Redirect': encodedURI }).send()
     }
 
     // Express does not set the correct mimetype for m4b files so use our defined mimetypes if available
-    const audioMimeType = getAudioMimeTypeFromExtname(Path.extname(audioTrack.metadata.path))
+    const audioMimeType = getAudioMimeTypeFromExtname(Path.extname(audioTrackPath))
     if (audioMimeType) {
       res.setHeader('Content-Type', audioMimeType)
     }
-    res.sendFile(audioTrack.metadata.path)
+    res.sendFile(audioTrackPath)
   }
 
   /**
