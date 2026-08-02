@@ -1012,6 +1012,7 @@ class LibraryItemController {
 
     // Express does not set the correct mimetype for m4b files so use our defined mimetypes if available
     const audioMimeType = getAudioMimeTypeFromExtname(Path.extname(filePath))
+    Logger.info(`[STRM-PLAY] mode=local-direct source=${filePath} range=${req.headers.range ? 'yes' : 'no'}`)
     if (audioMimeType) {
       res.setHeader('Content-Type', audioMimeType)
     }

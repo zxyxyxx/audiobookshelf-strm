@@ -1,6 +1,7 @@
 const axios = require('axios')
 const Path = require('path')
 const fs = require('../libs/fsExtra')
+const Logger = require('../Logger')
 const { filePathToPOSIX } = require('./fileUtils')
 
 const STRM_COMMENT_PREFIXES = ['#', '//']
@@ -260,6 +261,16 @@ async function proxyRemoteStream(remoteUrl, req, res) {
   if (resolvedUrl) {
     cacheRemoteUrl(remoteUrl, resolvedUrl)
   }
+
+  let sourceHost = 'unknown'
+  let resolvedHost = 'unknown'
+  try {
+    sourceHost = new URL(remoteUrl).host
+    resolvedHost = new URL(resolvedUrl || remoteUrl).host
+  } catch (error) {}
+  Logger.info(
+    `[STRM-PLAY] mode=proxy source=${sourceHost} resolved=${resolvedHost} cache=${cachedUrl ? 'hit' : 'miss'} status=${remoteRes.status} range=${req.headers.range ? 'yes' : 'no'}`
+  )
 
   const passthroughHeaders = ['content-type', 'content-length', 'content-range', 'accept-ranges', 'last-modified', 'etag', 'content-disposition']
   for (const header of passthroughHeaders) {

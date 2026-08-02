@@ -346,6 +346,7 @@ class SessionController {
 
     // Express does not set the correct mimetype for m4b files so use our defined mimetypes if available
     const audioMimeType = getAudioMimeTypeFromExtname(Path.extname(audioTrackPath))
+    Logger.info(`[STRM-PLAY] mode=local-direct source=${audioTrackPath} range=${req.headers.range ? 'yes' : 'no'}`)
     if (audioMimeType) {
       res.setHeader('Content-Type', audioMimeType)
     }
