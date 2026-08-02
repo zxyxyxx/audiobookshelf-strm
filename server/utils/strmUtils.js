@@ -131,6 +131,18 @@ function parseContentLength(headers = {}) {
   return parsed
 }
 
+function parseRemoteFileSize(headers = {}) {
+  const contentRange = headers['content-range']
+  if (contentRange) {
+    const match = String(contentRange).match(/\/(\d+)\s*$/)
+    if (match) {
+      const totalSize = Number(match[1])
+      if (Number.isFinite(totalSize) && totalSize >= 0) return totalSize
+    }
+  }
+  return parseContentLength(headers)
+}
+
 function getFirstStrmTargetLine(contents) {
   return contents
     .split(/\r?\n/)
@@ -167,7 +179,7 @@ async function getStrmTargetSize(strmTarget) {
         validateStatus: (status) => status >= 200 && status < 400
       })
 
-      const contentLength = parseContentLength(response.headers)
+      const contentLength = parseRemoteFileSize(response.headers)
       if (contentLength !== null) return contentLength
     } catch (error) {}
 
@@ -185,7 +197,7 @@ async function getStrmTargetSize(strmTarget) {
         validateStatus: (status) => status >= 200 && status < 400
       })
 
-      const contentLength = parseContentLength(response.headers)
+      const contentLength = parseRemoteFileSize(response.headers)
       response.data.destroy()
       if (contentLength !== null) return contentLength
     } catch (error) {}

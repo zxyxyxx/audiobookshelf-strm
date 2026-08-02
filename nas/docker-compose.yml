@@ -14,6 +14,7 @@ services:
     environment:
       - TZ=Asia/Shanghai
       - STRM_SCAN_PROBE=0               # 扫描时不对音频做 ffprobe 探测（云文件提速）
+      - STRM_SCAN_TARGET_SIZE=1         # 读取 STRM 目标音频真实大小（会增加一次远程访问）
       - STRM_SCAN_SKIP_PROBE_PATHS=/CloudNAS   # 这些路径下的文件跳过探测
       # 云直链映射：把容器内本地路径前缀映射为 HTTP 直链，按你的环境修改 IP/端口
       - STRM_DIRECT_URL_MAP=/CloudNAS=http://NAS_IP:19798/dav
