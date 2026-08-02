@@ -17,7 +17,7 @@ const fsExtra = require('../libs/fsExtra')
 const EBookFile = require('../objects/files/EBookFile')
 const AudioFile = require('../objects/files/AudioFile')
 const LibraryFile = require('../objects/files/LibraryFile')
-const { isStrmPath } = require('../utils/strmUtils')
+const { isStrmPath, readStrmTarget, getStrmTargetSize } = require('../utils/strmUtils')
 
 const RssFeedManager = require('../managers/RssFeedManager')
 const CoverManager = require('../managers/CoverManager')
@@ -86,6 +86,37 @@ class BookScanner {
 
   isStrmAudioFile(audioFile) {
     return isStrmPath(audioFile?.metadata?.path)
+  }
+
+  async refreshStrmTargetSizes(audioFiles, libraryScan, bookTitle) {
+    if (!AudioFileScanner.shouldReadStrmUrlSize) return false
+
+    const strmAudioFiles = audioFiles.filter((audioFile) => this.isStrmAudioFile(audioFile) && !audioFile.exclude)
+    if (!strmAudioFiles.length) return false
+
+    let updatedCount = 0
+    const batchSize = 16
+    for (let batch = 0; batch < strmAudioFiles.length; batch += batchSize) {
+      const files = strmAudioFiles.slice(batch, batch + batchSize)
+      await Promise.all(
+        files.map(async (audioFile) => {
+          try {
+            const target = audioFile.strmTarget || (await readStrmTarget(audioFile.metadata.path))
+            const targetSize = await getStrmTargetSize(target)
+            if (!Number.isFinite(targetSize) || targetSize <= 0 || Number(audioFile.metadata.size) === targetSize) return
+            audioFile.metadata.size = targetSize
+            updatedCount++
+          } catch (error) {
+            libraryScan.addLog(LogLevel.DEBUG, `Unable to refresh STRM target size for "${audioFile.metadata.path}": ${error.message}`)
+          }
+        })
+      )
+    }
+
+    if (updatedCount) {
+      libraryScan.addLog(LogLevel.INFO, `Updated real target sizes for ${updatedCount} STRM audio file(s) in book "${bookTitle}"`)
+    }
+    return updatedCount > 0
   }
 
   setStrmAudioFileDurationsFromChapters(audioFiles, chapters, libraryScan, bookTitle) {
@@ -239,6 +270,11 @@ class BookScanner {
       media.duration = this.getDurationFromAudioFiles(media.audioFiles)
 
       media.changed('audioFiles', true)
+    }
+
+    if (await this.refreshStrmTargetSizes(media.audioFiles, libraryScan, media.title)) {
+      media.changed('audioFiles', true)
+      hasMediaChanges = true
     }
 
     // Check if cover was removed
