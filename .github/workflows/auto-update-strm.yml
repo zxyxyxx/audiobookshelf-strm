@@ -73,7 +73,7 @@ jobs:
 
           # 官方 tag 必须存在
           if ! git rev-parse -q --verify "refs/tags/$L" >/dev/null; then
-            echo "⚠️ 未找到官方 tag $L，跳过本次"
+            echo "Official tag $L was not found; skipping"
             exit 0
           fi
 
