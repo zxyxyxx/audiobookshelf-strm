@@ -5,6 +5,27 @@ const { filePathToPOSIX } = require('./fileUtils')
 
 const STRM_COMMENT_PREFIXES = ['#', '//']
 const DEFAULT_PROBE_SKIP_PREFIXES = ['/CloudNAS']
+const remoteUrlCache = new Map()
+
+function getCachedRemoteUrl(remoteUrl) {
+  const cached = remoteUrlCache.get(remoteUrl)
+  if (!cached || cached.expiresAt <= Date.now()) {
+    remoteUrlCache.delete(remoteUrl)
+    return null
+  }
+  return cached.url
+}
+
+function cacheRemoteUrl(remoteUrl, resolvedUrl) {
+  if (!resolvedUrl || resolvedUrl === remoteUrl) return
+
+  // 115-style signed URLs commonly expose their expiry as `t` (Unix time).
+  // Never retain a URL beyond its own expiry; otherwise keep it briefly.
+  const parsed = new URL(resolvedUrl)
+  const signedExpiry = Number(parsed.searchParams.get('t'))
+  const expiresAt = Number.isFinite(signedExpiry) && signedExpiry > 0 ? signedExpiry * 1000 - 30_000 : Date.now() + 5 * 60_000
+  if (expiresAt > Date.now()) remoteUrlCache.set(remoteUrl, { url: resolvedUrl, expiresAt })
+}
 
 /**
  * Parse STRM_DIRECT_URL_MAP env var.
@@ -203,20 +224,41 @@ async function proxyRemoteStream(remoteUrl, req, res) {
     }
   }
 
-  let remoteRes
-  try {
-    remoteRes = await axios({
+  const cachedUrl = getCachedRemoteUrl(remoteUrl)
+  const requestRemoteStream = (url) =>
+    axios({
       method: 'get',
-      url: remoteUrl,
+      url,
       responseType: 'stream',
       maxRedirects: 10,
       timeout: 15000,
       headers,
       validateStatus: (status) => status >= 200 && status < 400
     })
+
+  let remoteRes
+  try {
+    remoteRes = await requestRemoteStream(cachedUrl || remoteUrl)
   } catch (error) {
-    const status = error.response?.status || 502
-    return res.sendStatus(status)
+    // A cached signed URL may have been invalidated early. Retry once through
+    // the original STRM target so playback can recover without rescanning.
+    if (cachedUrl && [401, 403, 404].includes(error.response?.status)) {
+      remoteUrlCache.delete(remoteUrl)
+      try {
+        remoteRes = await requestRemoteStream(remoteUrl)
+      } catch (retryError) {
+        const status = retryError.response?.status || 502
+        return res.sendStatus(status)
+      }
+    } else {
+      const status = error.response?.status || 502
+      return res.sendStatus(status)
+    }
+  }
+
+  const resolvedUrl = remoteRes.request?.res?.responseUrl || remoteRes.request?._redirectable?._currentUrl
+  if (resolvedUrl) {
+    cacheRemoteUrl(remoteUrl, resolvedUrl)
   }
 
   const passthroughHeaders = ['content-type', 'content-length', 'content-range', 'accept-ranges', 'last-modified', 'etag', 'content-disposition']
