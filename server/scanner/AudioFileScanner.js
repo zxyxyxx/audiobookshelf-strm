@@ -17,7 +17,7 @@ class AudioFileScanner {
   }
 
   get shouldReadStrmUrlSize() {
-    return process.env.STRM_SCAN_URL_SIZE === '1'
+    return process.env.STRM_SCAN_TARGET_SIZE === '1' || process.env.STRM_SCAN_URL_SIZE === '1'
   }
 
   async waitBeforeStrmProbe() {
@@ -38,8 +38,11 @@ class AudioFileScanner {
     const audioFile = new AudioFile()
     this.setTrackAndDiscNumberFromFilename(audioFile, mediaType, mediaMetadataFromScan, libraryFile)
 
-    // Skip fs.stat for cloud-mounted paths — CloudDrive2 doesn't need to be contacted at all during scan
-    const shouldReadSize = !isCloudMountPath(probePath) && (strmTarget ? this.shouldReadStrmUrlSize || !isUrl(probePath) : !isUrl(probePath))
+    // Cloud targets are skipped by default to avoid waking every remote file.
+    // STRM_SCAN_TARGET_SIZE=1 opts in to reading the real target size.
+    const shouldReadSize = strmTarget
+      ? this.shouldReadStrmUrlSize || (!isCloudMountPath(probePath) && !isUrl(probePath))
+      : !isCloudMountPath(probePath) && !isUrl(probePath)
     const targetSize = shouldReadSize ? await getStrmTargetSize(probePath) : null
     audioFile.setDataWithoutProbe(libraryFile, {
       duration: 0,
