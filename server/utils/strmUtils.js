@@ -268,6 +268,8 @@ async function proxyRemoteStream(remoteUrl, req, res) {
     sourceHost = new URL(remoteUrl).host
     resolvedHost = new URL(resolvedUrl || remoteUrl).host
   } catch (error) {}
+  const wasRedirected = !!resolvedUrl && resolvedUrl !== remoteUrl
+  Logger.info(`[STRM-PLAY] redirect=${wasRedirected ? 'yes' : 'no'} target=${resolvedHost}${wasRedirected ? ' (signed query redacted)' : ''}`)
   Logger.info(
     `[STRM-PLAY] mode=proxy source=${sourceHost} resolved=${resolvedHost} cache=${cachedUrl ? 'hit' : 'miss'} status=${remoteRes.status} range=${req.headers.range ? 'yes' : 'no'}`
   )
