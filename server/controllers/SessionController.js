@@ -279,6 +279,7 @@ class SessionController {
    * @param {Response} res
    */
   async getTrack(req, res) {
+    Logger.info(`[STRM-PLAY] request method=${req.method} url=${req.originalUrl} range=${req.headers.range ? 'yes' : 'no'}`)
     const audioTrackIndex = toNumber(req.params.index, null)
     if (audioTrackIndex === null) {
       Logger.error(`[SessionController] Invalid audio track index "${req.params.index}"`)
@@ -318,6 +319,7 @@ class SessionController {
     Logger.debug(`[SessionController] Serving audio track ${audioTrack.index} for session "${req.params.id}" belonging to user "${user.username}"`)
 
     let audioTrackPath = audioTrack.metadata.path
+    Logger.info(`[STRM-PLAY] source-path=${audioTrackPath}`)
     if (isUrl(audioTrackPath)) {
       return proxyRemoteStream(audioTrackPath, req, res)
     }
