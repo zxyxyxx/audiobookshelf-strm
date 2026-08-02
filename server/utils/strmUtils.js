@@ -191,10 +191,16 @@ module.exports.getStrmTargetSize = getStrmTargetSize
  */
 async function proxyRemoteStream(remoteUrl, req, res) {
   const headers = {
-    'User-Agent': 'Mozilla/5.0 Audiobookshelf STRM Relay'
+    'User-Agent': 'Mozilla/5.0 Audiobookshelf STRM Relay',
+    // Do not let axios negotiate gzip for byte ranges. Audio players need the
+    // original byte offsets and the upstream Content-Range header.
+    'Accept-Encoding': 'identity'
   }
-  if (req.headers.range) {
-    headers['Range'] = req.headers.range
+  const requestHeaderMap = { range: 'Range', 'if-range': 'If-Range', 'if-modified-since': 'If-Modified-Since' }
+  for (const [sourceHeader, targetHeader] of Object.entries(requestHeaderMap)) {
+    if (req.headers[sourceHeader]) {
+      headers[targetHeader] = req.headers[sourceHeader]
+    }
   }
 
   let remoteRes
@@ -213,7 +219,7 @@ async function proxyRemoteStream(remoteUrl, req, res) {
     return res.sendStatus(status)
   }
 
-  const passthroughHeaders = ['content-type', 'content-length', 'content-range', 'accept-ranges', 'last-modified', 'etag']
+  const passthroughHeaders = ['content-type', 'content-length', 'content-range', 'accept-ranges', 'last-modified', 'etag', 'content-disposition']
   for (const header of passthroughHeaders) {
     const value = remoteRes.headers[header]
     if (value != null) res.setHeader(header, value)
@@ -225,6 +231,10 @@ async function proxyRemoteStream(remoteUrl, req, res) {
   }
 
   res.status(remoteRes.status)
+  remoteRes.data.on('error', (error) => {
+    if (!res.headersSent) return res.sendStatus(502)
+    res.destroy(error)
+  })
   remoteRes.data.pipe(res)
 
   req.on('close', () => {
