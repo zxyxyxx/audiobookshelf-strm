@@ -336,6 +336,12 @@ class SessionController {
       }
     }
 
+    const cloudDirectUrl = getCloudDirectUrl(audioTrackPath)
+    if (cloudDirectUrl) {
+      Logger.info(`[STRM-PLAY] mode=cloud-http-map source-path=${audioTrackPath}`)
+      return proxyRemoteStream(cloudDirectUrl, req, res)
+    }
+
     // Cloud-mounted files fall through to res.sendFile below.
     // Express handles Range requests natively — only the bytes the client plays are read via FUSE.
     // No ffmpeg transcoding, no full-file download.
