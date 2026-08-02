@@ -1004,6 +1004,12 @@ class LibraryItemController {
       }
     }
 
+    const cloudDirectUrl = getCloudDirectUrl(filePath)
+    if (cloudDirectUrl) {
+      Logger.info(`[STRM-PLAY] mode=cloud-http-map source-path=${filePath}`)
+      return proxyRemoteStream(cloudDirectUrl, req, res)
+    }
+
     if (global.XAccel) {
       const encodedURI = encodeUriPath(global.XAccel + filePath)
       Logger.debug(`Use X-Accel to serve static file ${encodedURI}`)
