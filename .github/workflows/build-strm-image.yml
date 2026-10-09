@@ -1,6 +1,8 @@
 name: Build STRM Docker Image
 
 # 构建 STRM 定制版 Docker 镜像并推送到 GitHub 容器仓库 (GHCR)。
+# 双架构 (amd64 + arm64) 各在原生 runner 上构建，最后合并为多架构 manifest。
+# 注意：不要用 QEMU 模拟 arm64 —— node:20-alpine 里的 npm 在 QEMU 下会段错误 (exit 139)。
 # 触发方式：
 #   1) 推送形如 strm-v2.35.1 的 tag 时自动构建（镜像 tag 取 2.35.1）
 #   2) 在 Actions 页面手动运行 (workflow_dispatch)，可自定义镜像 tag
@@ -33,7 +35,15 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
@@ -43,6 +53,46 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.ref }}
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+
+      - name: Export digest
+        run: |
+          mkdir -p "${{ runner.temp }}/digests"
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    runs-on: ubuntu-24.04
+    needs: build
+    permissions:
+      packages: write
+    steps:
       - name: 计算镜像 tag
         id: tags
         run: |
@@ -56,8 +106,12 @@ jobs:
           echo "list=${IMAGE}:${V},${IMAGE}:latest" >> "$GITHUB_OUTPUT"
           echo "将构建: ${IMAGE}:${V} 和 ${IMAGE}:latest"
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -69,12 +123,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.tags.outputs.list }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(echo "${{ steps.tags.outputs.list }}" | tr ',' '\n' | sed 's/^/-t /' | tr '\n' ' ') \
+            $(printf "${IMAGE}@sha256:%s " *)
