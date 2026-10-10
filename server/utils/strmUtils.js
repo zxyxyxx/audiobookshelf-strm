@@ -311,3 +311,48 @@ async function proxyRemoteStream(remoteUrl, req, res) {
   })
 }
 module.exports.proxyRemoteStream = proxyRemoteStream
+
+/**
+ * Pre-warm the resolved direct URL for the *next* track while the current one
+ * is playing. Runs the same redirect chain as proxyRemoteStream (STRM URL ->
+ * OpenList -> signed Quark URL) and populates remoteUrlCache, so when the
+ * client requests the next track it hits the cache instead of waiting ~10s
+ * for OpenList to call the Quark API again.
+ *
+ * Fire-and-forget: never throws, never blocks playback.
+ * Disable with STRM_PRELOAD_NEXT=0.
+ *
+ * @param {string} remoteUrl STRM target URL (pre-redirect)
+ */
+async function warmRemoteUrl(remoteUrl) {
+  if (process.env.STRM_PRELOAD_NEXT === '0') return
+  if (!remoteUrl || getCachedRemoteUrl(remoteUrl)) return
+  let remoteRes = null
+  try {
+    remoteRes = await axios({
+      method: 'get',
+      url: remoteUrl,
+      responseType: 'stream',
+      maxRedirects: 10,
+      timeout: 30000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 Audiobookshelf STRM Preload',
+        'Accept-Encoding': 'identity',
+        Range: 'bytes=0-1'
+      },
+      validateStatus: (status) => status >= 200 && status < 400
+    })
+    const resolvedUrl = remoteRes.request?.res?.responseUrl || remoteRes.request?._redirectable?._currentUrl
+    if (resolvedUrl) {
+      cacheRemoteUrl(remoteUrl, resolvedUrl)
+      Logger.info('[STRM-PRELOAD] Warmed next track (signed query redacted)')
+    }
+  } catch (error) {
+    Logger.warn(`[STRM-PRELOAD] Warm failed: ${error.message || error}`)
+  } finally {
+    try {
+      remoteRes?.data?.destroy()
+    } catch (error) {}
+  }
+}
+module.exports.warmRemoteUrl = warmRemoteUrl
