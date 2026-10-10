@@ -238,7 +238,7 @@ async function proxyRemoteStream(remoteUrl, req, res) {
     }
   }
 
-  const cachedUrl = getCachedRemoteUrl(remoteUrl)
+  const cachedUrl = getCachedRemoteUrl(remoteUrl) || (await waitForWarm(remoteUrl))
   const requestRemoteStream = (url) =>
     axios({
       method: 'get',
@@ -361,3 +361,17 @@ async function warmRemoteUrl(remoteUrl) {
   }
 }
 module.exports.warmRemoteUrl = warmRemoteUrl
+/**
+ * Wait for an in-flight warm of the same URL to complete (max timeoutMs),
+ * so a track request doesn't start a duplicate upstream resolution while
+ * a warm is already running. Returns the cached URL if available.
+ */
+async function waitForWarm(remoteUrl, timeoutMs = 10000) {
+  if (!warmingUrls.has(remoteUrl)) return getCachedRemoteUrl(remoteUrl)
+  const start = Date.now()
+  while (warmingUrls.has(remoteUrl) && Date.now() - start < timeoutMs) {
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
+  return getCachedRemoteUrl(remoteUrl)
+}
+module.exports.waitForWarm = waitForWarm
