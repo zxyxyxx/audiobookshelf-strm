@@ -7,6 +7,7 @@ const { filePathToPOSIX } = require('./fileUtils')
 const STRM_COMMENT_PREFIXES = ['#', '//']
 const DEFAULT_PROBE_SKIP_PREFIXES = ['/CloudNAS']
 const remoteUrlCache = new Map()
+const warmingUrls = new Set()
 
 function getCachedRemoteUrl(remoteUrl) {
   const cached = remoteUrlCache.get(remoteUrl)
@@ -327,6 +328,9 @@ module.exports.proxyRemoteStream = proxyRemoteStream
 async function warmRemoteUrl(remoteUrl) {
   if (process.env.STRM_PRELOAD_NEXT === '0') return
   if (!remoteUrl || getCachedRemoteUrl(remoteUrl)) return
+  // Dedupe concurrent warms for the same URL (client may request a track twice)
+  if (warmingUrls.has(remoteUrl)) return
+  warmingUrls.add(remoteUrl)
   let remoteRes = null
   try {
     remoteRes = await axios({
@@ -350,6 +354,7 @@ async function warmRemoteUrl(remoteUrl) {
   } catch (error) {
     Logger.warn(`[STRM-PRELOAD] Warm failed: ${error.message || error}`)
   } finally {
+    warmingUrls.delete(remoteUrl)
     try {
       remoteRes?.data?.destroy()
     } catch (error) {}
