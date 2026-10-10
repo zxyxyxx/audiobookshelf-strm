@@ -253,17 +253,57 @@ class AudioFileScanner {
    * @returns {Promise<AudioFile[]>}
    */
   async executeMediaFileScans(mediaType, libraryItemScanData, audioLibraryFiles, options = {}) {
-    const batchSize = 32
+    // STRM: remote URLs (OpenList -> Quark) are slow and rate-limited.
+    // 32 concurrent ffprobes hammer the API and cause random probe failures
+    // (files get skipped). 4 concurrent + retry is slower but reliable.
+    const batchSize = 4
     const results = []
+    const failedFiles = []
     for (let batch = 0; batch < audioLibraryFiles.length; batch += batchSize) {
       const proms = []
       for (let i = batch; i < Math.min(batch + batchSize, audioLibraryFiles.length); i++) {
-        proms.push(this.scan(mediaType, audioLibraryFiles[i], libraryItemScanData.mediaMetadata, options))
+        const lf = audioLibraryFiles[i]
+        proms.push(
+          this.scanWithRetry(mediaType, lf, libraryItemScanData.mediaMetadata, options).then((r) => {
+            if (!r) failedFiles.push(lf?.metadata?.path || 'unknown')
+            return r
+          })
+        )
       }
       results.push(...(await Promise.all(proms).then((scanResults) => scanResults.filter((sr) => sr))))
     }
 
+    if (failedFiles.length) {
+      Logger.error(`[AudioFileScanner] Scan finished: ${audioLibraryFiles.length} files, ${results.length} OK, ${failedFiles.length} SKIPPED (see list below, re-scan to retry)`)
+      for (const fp of failedFiles) {
+        Logger.error(`[AudioFileScanner]   SKIPPED: "${fp}"`)
+      }
+    } else {
+      Logger.info(`[AudioFileScanner] Scan finished: all ${results.length} files OK`)
+    }
+
     return results
+  }
+
+  /**
+   * Scan a single audio file with retry for transient remote failures.
+   * Quark API is flaky (timeouts, 500s, rate limits); retry with backoff
+   * before giving up and skipping the file.
+   */
+  async scanWithRetry(mediaType, libraryFile, mediaMetadataFromScan, options = {}, maxRetries = 5) {
+    const filePath = libraryFile?.metadata?.path || 'unknown'
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      const result = await this.scan(mediaType, libraryFile, mediaMetadataFromScan, options)
+      if (result) return result
+      if (attempt < maxRetries) {
+        // 2s, 4s, 8s, 16s — 耗过夸克的限流窗口
+        const delayMs = Math.pow(2, attempt) * 1000
+        Logger.warn(`[AudioFileScanner] Scan failed for "${filePath}", retry ${attempt}/${maxRetries} in ${delayMs}ms`)
+        await new Promise((resolve) => setTimeout(resolve, delayMs))
+      }
+    }
+    Logger.error(`[AudioFileScanner] Scan failed after ${maxRetries} attempts, skipping: "${filePath}"`)
+    return null
   }
 
   /**
