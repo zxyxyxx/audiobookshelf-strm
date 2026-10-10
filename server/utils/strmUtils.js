@@ -295,6 +295,26 @@ async function proxyRemoteStream(remoteUrl, req, res) {
     if (value != null) res.setHeader(header, value)
   }
 
+  // Fix Content-Type for strict players (iOS AVPlayer rejects generic
+  // application/octet-stream that Quark's CDN returns for audio files).
+  // Override based on the file extension from the STRM target URL.
+  const extMatch = /\.([a-z0-9]+)(?:[?#]|$)/i.exec(remoteUrl)
+  const audioMimeByExt = {
+    m4a: 'audio/mp4',
+    m4b: 'audio/mp4',
+    mp3: 'audio/mpeg',
+    ogg: 'audio/ogg',
+    oga: 'audio/ogg',
+    opus: 'audio/opus',
+    flac: 'audio/flac',
+    wav: 'audio/wav',
+    aac: 'audio/aac'
+  }
+  const fixedMime = extMatch && audioMimeByExt[extMatch[1].toLowerCase()]
+  if (fixedMime) {
+    res.setHeader('content-type', fixedMime)
+  }
+
   // If no Accept-Ranges was returned, declare byte range support anyway so players can seek
   if (!remoteRes.headers['accept-ranges']) {
     res.setHeader('Accept-Ranges', 'bytes')
