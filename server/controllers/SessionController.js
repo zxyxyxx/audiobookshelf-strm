@@ -4,7 +4,7 @@ const Logger = require('../Logger')
 const Database = require('../Database')
 const { toNumber, isUUID } = require('../utils/index')
 const { getAudioMimeTypeFromExtname, encodeUriPath } = require('../utils/fileUtils')
-const { isStrmPath, isUrl, readStrmTarget, proxyRemoteStream, getCloudDirectUrl } = require('../utils/strmUtils')
+const { isStrmPath, isUrl, readStrmTarget, proxyRemoteStream, getCloudDirectUrl, warmRemoteUrl } = require('../utils/strmUtils')
 const { PlayMethod } = require('../utils/constants')
 
 const ShareManager = require('../managers/ShareManager')
@@ -317,6 +317,22 @@ class SessionController {
 
     const user = await Database.userModel.getUserById(playbackSession.userId)
     Logger.debug(`[SessionController] Serving audio track ${audioTrack.index} for session "${req.params.id}" belonging to user "${user.username}"`)
+
+    // Preload next track: warm the STRM -> OpenList -> Quark redirect chain for
+    // the next episode while the current one plays, so the ~10s cold start on
+    // track change becomes a remoteUrlCache hit. Fire-and-forget, never blocks.
+    const nextTrack = playbackSession.audioTracks.find((t) => toNumber(t.index, 1) === audioTrackIndex + 1)
+    const nextTrackPath = nextTrack?.metadata?.path
+    if (nextTrackPath) {
+      ;(async () => {
+        try {
+          const target = isStrmPath(nextTrackPath) ? await readStrmTarget(nextTrackPath) : nextTrackPath
+          if (isUrl(target)) await warmRemoteUrl(target)
+        } catch (error) {
+          Logger.warn(`[STRM-PRELOAD] Next-track resolve failed: ${error.message || error}`)
+        }
+      })()
+    }
 
     let audioTrackPath = audioTrack.metadata.path
     Logger.info(`[STRM-PLAY] source-path=${audioTrackPath}`)
