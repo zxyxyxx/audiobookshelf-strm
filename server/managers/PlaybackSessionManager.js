@@ -11,7 +11,7 @@ const uaParserJs = require('../libs/uaParser')
 const requestIp = require('../libs/requestIp')
 
 const { PlayMethod } = require('../utils/constants')
-const { isStrmPath, readStrmTarget } = require('../utils/strmUtils')
+const { isStrmPath, readStrmTarget, isUrl, warmRemoteUrl } = require('../utils/strmUtils')
 
 const PlaybackSession = require('../objects/PlaybackSession')
 const DeviceInfo = require('../objects/DeviceInfo')
@@ -86,6 +86,37 @@ class PlaybackSessionManager {
     const sessionJson = session.toJSONForClient(libraryItem)
     await this.resolveStrmPathsForClient(sessionJson)
     res.json(sessionJson)
+
+    // Preload the resume track's remote URL at session creation (user tapped the
+    // book, hasn't hit play yet). This gives the slow OpenList -> Quark chain a
+    // head start so the first play doesn't hit a cold cache. Fire-and-forget.
+    // If the track request arrives while warming, it waits for the warm
+    // (see waitForWarm) instead of starting a duplicate upstream request.
+    ;(async () => {
+      try {
+        const tracks = session.audioTracks || []
+        if (!tracks.length) return
+        const pos = Number(session.currentTime) || 0
+        let target = tracks[0]
+        for (const t of tracks) {
+          const start = Number(t.startOffset) || 0
+          const dur = Number(t.duration) || 0
+          if (pos >= start && pos < start + dur) {
+            target = t
+            break
+          }
+        }
+        const strmPath = target?.metadata?.path
+        if (!strmPath) return
+        const url = isStrmPath(strmPath) ? await readStrmTarget(strmPath) : strmPath
+        if (isUrl(url)) {
+          Logger.info(`[STRM-PRELOAD] Warming resume track at session start (pos=${Math.round(pos)}s)`)
+          await warmRemoteUrl(url)
+        }
+      } catch (error) {
+        Logger.warn(`[STRM-PRELOAD] Session-start warm failed: ${error.message || error}`)
+      }
+    })()
   }
 
   async resolveStrmPathForClient(mediaFile, resolvedPathCache) {
