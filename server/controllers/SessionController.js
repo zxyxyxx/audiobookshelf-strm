@@ -321,17 +321,23 @@ class SessionController {
     // Preload next track: warm the STRM -> OpenList -> Quark redirect chain for
     // the next episode while the current one plays, so the ~10s cold start on
     // track change becomes a remoteUrlCache hit. Fire-and-forget, never blocks.
+    // Delayed (default 60s) so the warm never races the initial playback
+    // request against OpenList/Quark, which can't handle the concurrency.
+    // Tune with STRM_PRELOAD_DELAY_MS, disable with STRM_PRELOAD_NEXT=0.
     const nextTrack = playbackSession.audioTracks.find((t) => toNumber(t.index, 1) === audioTrackIndex + 1)
     const nextTrackPath = nextTrack?.metadata?.path
     if (nextTrackPath) {
-      ;(async () => {
-        try {
-          const target = isStrmPath(nextTrackPath) ? await readStrmTarget(nextTrackPath) : nextTrackPath
-          if (isUrl(target)) await warmRemoteUrl(target)
-        } catch (error) {
-          Logger.warn(`[STRM-PRELOAD] Next-track resolve failed: ${error.message || error}`)
-        }
-      })()
+      const preloadDelayMs = Number(process.env.STRM_PRELOAD_DELAY_MS) || 60_000
+      setTimeout(() => {
+        ;(async () => {
+          try {
+            const target = isStrmPath(nextTrackPath) ? await readStrmTarget(nextTrackPath) : nextTrackPath
+            if (isUrl(target)) await warmRemoteUrl(target)
+          } catch (error) {
+            Logger.warn(`[STRM-PRELOAD] Next-track resolve failed: ${error.message || error}`)
+          }
+        })()
+      }, preloadDelayMs)
     }
 
     let audioTrackPath = audioTrack.metadata.path
