@@ -253,10 +253,10 @@ class AudioFileScanner {
    * @returns {Promise<AudioFile[]>}
    */
   async executeMediaFileScans(mediaType, libraryItemScanData, audioLibraryFiles, options = {}) {
-    // STRM: remote URLs (OpenList -> Quark) are slow and rate-limited.
-    // 32 concurrent ffprobes hammer the API and cause random probe failures
-    // (files get skipped). 4 concurrent + retry is slower but reliable.
-    const batchSize = 4
+    // STRM: remote URLs can be flaky (Quark API rate limits/timeouts).
+    // Keep upstream batchSize=32 for speed; scanWithRetry handles transient
+    // failures with backoff instead of dropping files.
+    const batchSize = 32
     const results = []
     const failedFiles = []
     for (let batch = 0; batch < audioLibraryFiles.length; batch += batchSize) {
