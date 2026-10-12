@@ -21,11 +21,14 @@ function getCachedRemoteUrl(remoteUrl) {
 function cacheRemoteUrl(remoteUrl, resolvedUrl) {
   if (!resolvedUrl || resolvedUrl === remoteUrl) return
 
-  // 115-style signed URLs commonly expose their expiry as `t` (Unix time).
+  // Signed URLs expose expiry as `t` (115-style) or `Expires`/`expires` (Quark/OSS-style, Unix time).
   // Never retain a URL beyond its own expiry; otherwise keep it briefly.
   const parsed = new URL(resolvedUrl)
-  const signedExpiry = Number(parsed.searchParams.get('t'))
-  const expiresAt = Number.isFinite(signedExpiry) && signedExpiry > 0 ? signedExpiry * 1000 - 30_000 : Date.now() + 5 * 60_000
+  const tParam = Number(parsed.searchParams.get('t'))
+  const expiresParam = Number(parsed.searchParams.get('Expires') ?? parsed.searchParams.get('expires'))
+  const signedExpiry = (Number.isFinite(tParam) && tParam > 0) ? tParam
+    : (Number.isFinite(expiresParam) && expiresParam > 0 ? expiresParam : NaN)
+  const expiresAt = Number.isFinite(signedExpiry) ? signedExpiry * 1000 - 30_000 : Date.now() + 5 * 60_000
   if (expiresAt > Date.now()) remoteUrlCache.set(remoteUrl, { url: resolvedUrl, expiresAt })
 }
 
