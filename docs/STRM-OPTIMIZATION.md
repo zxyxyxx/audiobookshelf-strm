@@ -1,7 +1,7 @@
 # STRM 定制版优化说明 / STRM Fork Optimization Notes
 
 > 基线 / Base: `strm` @ `467e7ce` (upstream v2.37.2 + STRM patches)
-> 本次改动 / This change set: **17 files modified, 13 files added**, 48 unit tests
+> 本次改动 / This change set: **17 files modified, 14 files added**, 52 unit tests
 > 四轮 / four passes: STRM 播放链路 · 主题 · 首播 · arm64+海外（含可追溯与瘦身）
 
 ---
@@ -330,7 +330,7 @@ git push origin strm --force-with-lease && git push origin strm-v2.37.2.1
 
 ---
 
-## 11. 测试覆盖 / Test coverage（48 cases）
+## 11. 测试覆盖 / Test coverage（52 cases）
 
 | 文件 / File | 数量 | 覆盖 / Covers |
 |---|---|---|
@@ -341,6 +341,7 @@ git push origin strm --force-with-lease && git push origin strm-v2.37.2.1
 | `strm-test/strmNetwork.test.js` | 9 | 出口代理（direct/带认证/非法值）、可配超时、503/ECONNRESET 重试、`STRM_STREAM_RETRY=0`、403 不重试、瞬时判定表 |
 | `strm-test/strmBuild.test.js` | 4 | 构建元数据（默认/注入/空白值）+ **文档一致性**（每个 `STRM_*` 变量必须在 `nas/README.md` 里） |
 | `strm-test/strmControllerSafety.test.js` | 4 | **防进程自杀**：详情页预热必须是模块级函数、三个入口的 `serveStrmStream` 必须 try 包裹、`this.*` 成员白名单 |
+| `strm-test/strmWarmRace.test.js` | 4 | 预热与首播抢上游：`cancelWarm` 取消在途预热、播放请求自动取消预热、慢失败不重试、快失败重试 |
 
 ---
 
@@ -485,3 +486,29 @@ The workflow normalises `strm-v2.37.2`, `2.37.2`, `v2.37.2` to `v2.37.2`; a fork
 > `ffmpeg` 仍用 alpine 包（arm64 有现成包）。若还要更小，可换静态 ffmpeg 构建（单文件 ~78 MB，但省掉依赖树），代价是构建期多一次外网下载。
 > `ffmpeg` stays on the alpine package (arm64 available). For a smaller image, swap in a static ffmpeg build.
 
+### 14.2 播放报 500 / 504：预热和首播抢同一条上游连接
+
+**症状 / Symptom**（2026-11-14 实际日志）：
+
+```
+16:51:12  [STRM-PRELOAD] Warming resume track at session start (pos=829779s)   ← 预热启动（priority）
+16:51:13  [STRM-PLAY]    mode=proxy-strm source=牧神记1546….strm range=yes      ← 1 秒后真实播放请求
+16:51:33  [STRM-PRELOAD] Warm failed: timeout of 30000ms exceeded
+16:51:33  [STRM-PLAY]    Transient upstream failure (status=500), retrying once
+16:51:48  [STRM-PLAY]    Retry failed: status=504
+```
+
+**根因 / Root cause**：OpenList / 夸克 扛不住「同一本书的预热 + 真实播放」并发，一条超时、一条 500。
+而且原代码用 `startOffset/duration` 匹配续播轨，时长缺失时会退回 `tracks[0]`——预热的是**别的文件**，等于白打一次上游。
+
+**修法 / Fix**：
+
+| 改动 | 说明 |
+|---|---|
+| `cancelWarm()` + `warmInflight` 映射 | 真实播放请求到达时，用 axios `CancelToken` 立刻掐掉同 URL 的预热（axios 0.27 不支持 AbortSignal） |
+| 会话启动预热延迟 `STRM_PRELOAD_SESSION_DELAY_MS`（默认 8s） | 让首播请求先跑；预热启动前还会检查 `session.currentTime` 是否已经前进，已经开播就跳过 |
+| 续播轨匹配失败时**不再退回 tracks[0]** | 时长未知（`duration<=0`）就跳过预热，宁可少一次预热也不打错文件 |
+| 重试只在「快失败」时发生 `STRM_RETRY_FAST_FAIL_MS`（默认 5s） | 15s 超时后再等一轮，用户白等 15s；现在超时直接报错 |
+| 失败日志补 `elapsed=…ms` | 一眼看出是超时还是秒回 500 |
+
+> 结论 / Takeaway：预热必须**可取消**且**不能和真实请求并发**。凡是往「限流的上游」发投机请求的地方，都要能被打断。

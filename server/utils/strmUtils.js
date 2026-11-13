@@ -30,6 +30,9 @@ const UPSTREAM_TIMEOUTS = {
 }
 // Extra attempts for transient upstream failures (5xx / connection resets).
 const STREAM_RETRY_COUNT = Number(process.env.STRM_STREAM_RETRY ?? 1)
+// Only retry when the first attempt failed fast: retrying after a 15s timeout
+// just doubles the time before the user sees an error.
+const RETRY_FAST_FAIL_MS = Number(process.env.STRM_RETRY_FAST_FAIL_MS) || 5000
 
 /**
  * Optional egress proxy for upstream requests.
@@ -74,6 +77,11 @@ const refreshTimers = new Map()
 
 // URLs currently being pre-warmed (dedupes concurrent warms).
 const warmingUrls = new Set()
+
+// Cancellation handles for in-flight warms, so a real playback request can kill
+// a speculative warm that is competing for the same upstream connection.
+// (axios 0.27 has no AbortSignal support, so CancelToken is used.)
+const warmInflight = new Map()
 
 // Per-URL serialization of cold upstream resolutions (STRM -> OpenList -> CDN).
 // Without this, N clients hitting a cold track at the same time each run the
@@ -699,7 +707,15 @@ async function proxyRemoteStream(remoteUrl, req, res) {
     return remoteRes
   }
 
+  // A speculative warm for this exact URL competes for the same (rate-limited)
+  // upstream connection — OpenList/Quark answer 500 or hang when that happens.
+  // The real request always wins: cancel the warm before touching the cache.
+  if (cancelWarm(remoteUrl)) {
+    Logger.info('[STRM-PLAY] Cancelled an in-flight prewarm competing with playback')
+  }
+
   const cachedUrl = getCachedRemoteUrl(remoteUrl) || (await waitForWarm(remoteUrl))
+  const attemptStartedAt = Date.now()
 
   let remoteRes
   try {
@@ -716,10 +732,12 @@ async function proxyRemoteStream(remoteUrl, req, res) {
         Logger.warn(`[STRM-PLAY] Retry through original target failed: status=${status}`)
         return res.sendStatus(status)
       }
-    } else if (isTransientUpstreamError(error) && STREAM_RETRY_COUNT > 0) {
-      // Cross-border links drop a connection or answer 502/503 once and then
+    } else if (isTransientUpstreamError(error) && STREAM_RETRY_COUNT > 0 && Date.now() - attemptStartedAt < RETRY_FAST_FAIL_MS) {
+      // Cross-border links drop a connection or answer 502/503 *quickly* and then
       // work. One retry usually recovers; STRM_STREAM_RETRY=0 disables it.
-      Logger.warn(`[STRM-PLAY] Transient upstream failure (status=${error.response?.status || 'n/a'} code=${error.code || 'n/a'}), retrying once`)
+      // Only retry fast failures: retrying after a 15s timeout just doubles the
+      // wait before the user sees an error.
+      Logger.warn(`[STRM-PLAY] Transient upstream failure (status=${error.response?.status || 'n/a'} code=${error.code || 'n/a'} after ${Date.now() - attemptStartedAt}ms), retrying once`)
       remoteUrlCache.delete(remoteUrl)
       try {
         remoteRes = await runExclusive(remoteUrl, resolveRemote)
@@ -730,7 +748,8 @@ async function proxyRemoteStream(remoteUrl, req, res) {
       }
     } else {
       const status = mapErrorStatus(error)
-      Logger.warn(`[STRM-PLAY] Upstream request failed: status=${status} code=${error.code || 'n/a'}`)
+      const elapsed = Date.now() - attemptStartedAt
+      Logger.warn(`[STRM-PLAY] Upstream request failed: status=${status} code=${error.code || 'n/a'} elapsed=${elapsed}ms`)
       return res.sendStatus(status)
     }
   }
@@ -807,6 +826,11 @@ async function warmRemoteUrl(remoteUrl, options = {}) {
   // Dedupe concurrent warms for the same URL (client may request a track twice)
   if (warmingUrls.has(remoteUrl)) return
   warmingUrls.add(remoteUrl)
+
+  // CancelToken so a real playback request can abort this speculative warm.
+  const cancelSource = axios.CancelToken?.source ? axios.CancelToken.source() : null
+  if (cancelSource) warmInflight.set(remoteUrl, cancelSource)
+
   let remoteRes = null
   try {
     const runWarm = async () => {
@@ -822,6 +846,7 @@ async function warmRemoteUrl(remoteUrl, options = {}) {
           Range: 'bytes=0-1'
         },
         validateStatus: (status) => status >= 200 && status < 400,
+        ...(cancelSource ? { cancelToken: cancelSource.token } : {}),
         ...AGENT_CONFIG, ...UPSTREAM_PROXY_CONFIG
       })
       const resolvedUrl = extractResolvedUrl(remoteRes)
@@ -837,15 +862,42 @@ async function warmRemoteUrl(remoteUrl, options = {}) {
       await warmLimiter(runWarm)
     }
   } catch (error) {
-    Logger.warn(`[STRM-PRELOAD] Warm failed: ${error.message || error}`)
+    if (axios.isCancel?.(error) || error?.code === 'ERR_CANCELED') {
+      Logger.info('[STRM-PRELOAD] Warm cancelled: a real playback request took over')
+    } else {
+      Logger.warn(`[STRM-PRELOAD] Warm failed: ${error.message || error}`)
+    }
   } finally {
     warmingUrls.delete(remoteUrl)
+    warmInflight.delete(remoteUrl)
     try {
       remoteRes?.data?.destroy()
     } catch (error) {}
   }
 }
 module.exports.warmRemoteUrl = warmRemoteUrl
+
+/**
+ * Cancel an in-flight speculative warm for this URL.
+ * Called by proxyRemoteStream: OpenList/Quark cannot serve a speculative warm
+ * and a real play request for the same track at the same time — the second one
+ * comes back as 500 or hangs until timeout.
+ *
+ * @param {string} remoteUrl
+ * @returns {boolean} true when a warm was actually cancelled
+ */
+function cancelWarm(remoteUrl) {
+  const cancelSource = warmInflight.get(remoteUrl)
+  if (!cancelSource) return false
+  try {
+    cancelSource.cancel('superseded by playback request')
+  } catch (error) {}
+  warmInflight.delete(remoteUrl)
+  // Let waitForWarm stop waiting immediately.
+  warmingUrls.delete(remoteUrl)
+  return true
+}
+module.exports.cancelWarm = cancelWarm
 
 /**
  * Wait for an in-flight warm of the same URL to complete (max timeoutMs),
