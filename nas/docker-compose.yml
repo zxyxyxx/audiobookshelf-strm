@@ -34,6 +34,7 @@ services:
       - STRM_URL_REFRESH_AHEAD=1        # 签名 URL 到期前自动续签（0=关闭）
       - STRM_URL_REFRESH_AHEAD_MS=60000 # 提前多久续签
       - STRM_PRELOAD_SESSION_DELAY_MS=8000   # 会话启动预热延迟；别调小，会和首播抢 OpenList
+      - STRM_WAIT_WARM_MS=20000         # 播放请求等同轨预热的上限（冷解析约 15s）
       - STRM_RETRY_FAST_FAIL_MS=5000    # 只有快失败才重试（超时后再等一轮没意义）
       - STRM_SESSION_RESOLVE_LIMIT=100  # 建会话时最多预解析多少轨（0=不限）
       - STRM_HTTP_MAX_SOCKETS=64        # 到 OpenList/CDN 的 keep-alive 连接上限

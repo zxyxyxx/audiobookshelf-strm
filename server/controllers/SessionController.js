@@ -319,6 +319,11 @@ class SessionController {
       Logger.error(`[SessionController] Unable to find playback session with id=${req.params.id}`)
       return res.sendStatus(404)
     }
+    // Tells the session-start prewarm that playback already began, so it must not
+    // fire a speculative warm that competes for the same upstream.
+    try {
+      this.playbackSessionManager.markTrackServed(playbackSession.id)
+    } catch (error) {}
 
     let audioTrack = playbackSession.audioTracks.find((t) => toNumber(t.index, 1) === audioTrackIndex)
 

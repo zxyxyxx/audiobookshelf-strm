@@ -1,7 +1,7 @@
 # STRM 定制版优化说明 / STRM Fork Optimization Notes
 
 > 基线 / Base: `strm` @ `467e7ce` (upstream v2.37.2 + STRM patches)
-> 本次改动 / This change set: **17 files modified, 14 files added**, 52 unit tests
+> 本次改动 / This change set: **17 files modified, 15 files added**, 59 unit tests
 > 四轮 / four passes: STRM 播放链路 · 主题 · 首播 · arm64+海外（含可追溯与瘦身）
 
 ---
@@ -330,7 +330,7 @@ git push origin strm --force-with-lease && git push origin strm-v2.37.2.1
 
 ---
 
-## 11. 测试覆盖 / Test coverage（52 cases）
+## 11. 测试覆盖 / Test coverage（59 cases）
 
 | 文件 / File | 数量 | 覆盖 / Covers |
 |---|---|---|
@@ -342,6 +342,7 @@ git push origin strm --force-with-lease && git push origin strm-v2.37.2.1
 | `strm-test/strmBuild.test.js` | 4 | 构建元数据（默认/注入/空白值）+ **文档一致性**（每个 `STRM_*` 变量必须在 `nas/README.md` 里） |
 | `strm-test/strmControllerSafety.test.js` | 4 | **防进程自杀**：详情页预热必须是模块级函数、三个入口的 `serveStrmStream` 必须 try 包裹、`this.*` 成员白名单 |
 | `strm-test/strmWarmRace.test.js` | 4 | 预热与首播抢上游：`cancelWarm` 取消在途预热、播放请求自动取消预热、慢失败不重试、快失败重试 |
+| `strm-test/strmResumeTrack.test.js` | 7 | 续播轨定位：无进度/边界/超界/时长未知/排除文件/真实 1500 轨场景 |
 
 ---
 
@@ -512,3 +513,31 @@ The workflow normalises `strm-v2.37.2`, `2.37.2`, `v2.37.2` to `v2.37.2`; a fork
 | 失败日志补 `elapsed=…ms` | 一眼看出是超时还是秒回 500 |
 
 > 结论 / Takeaway：预热必须**可取消**且**不能和真实请求并发**。凡是往「限流的上游」发投机请求的地方，都要能被打断。
+### 14.3 首条仍要 14.6 秒：预热暖错了轨
+
+**症状 / Symptom**（2026-11-14 日志）：打开书 → 点播放 → 首条 `cache=miss`，14.6s 才出字节；后面的轨全是 `cache=hit`（250ms）。
+
+```
+17:10:31.930  track/1080 请求（cache=miss）→ 14.6s 冷解析
+17:10:39.140  会话预热才启动（+8s）——播放早已在解析，帮不上首条
+```
+
+**三个原因 / Three causes**：
+
+| 原因 | 说明 |
+|---|---|
+| 详情页预热暖的是**第一轨** | 1500 轨的书从第 1080 轨续播，暖第一轨等于没暖 |
+| 会话预热晚 8s 才启动 | session 是「点播放」时才建的，+8s 时首条已经在解析 |
+| `waitForWarm` 只等 10s | 冷解析要 15s，用户秒点播放时会**重复解析**而不是等同一条在途请求 |
+
+**修法 / Fix**：
+
+| 改动 | 说明 |
+|---|---|
+| `pickResumeFileIndex(audioFiles, currentTime)` | 按累计时长把进度映射到具体文件；跳过 `exclude`、按 index 排序、边界/超界/时长未知都有兜底 |
+| 详情页预热改用**阅读进度** | `findOne` 里取 `req.user.getOldMediaProgress()` 的 `currentTime`，暖「你真正要续播的那一轨」，并打 INFO 日志 `Warming resume track on item open (pos=…)` |
+| 会话预热加「已开播就跳过」 | `PlaybackSessionManager.markTrackServed()`：只要 `getTrack` 已经服务过，就不再做投机预热 |
+| `waitForWarm` 默认 10s → `STRM_WAIT_WARM_MS`（20s） | 秒点播放时改为「等同一条在途解析」，不再重复打上游 |
+
+> 预期 / Expectation：打开详情页 → 停 5~10 秒 → 点播放，首条应变成 `cache=hit`。
+> 若仍 `cache=miss`，看日志里 `Warming resume track on item open (pos=…)` 的 pos 与随后 `track/N` 是否对得上。

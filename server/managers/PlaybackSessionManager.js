@@ -34,6 +34,15 @@ class PlaybackSessionManager {
      * @type {Map<string, NodeJS.Timeout>}
      */
     this.preloadTimers = new Map()
+
+    /**
+     * Sessions that already served at least one track request. The session-start
+     * prewarm is pointless (and only competes for the upstream) once playback has
+     * begun, so it is skipped for these.
+     *
+     * @type {Set<string>}
+     */
+    this.strmServedSessions = new Set()
   }
 
   /**
@@ -134,6 +143,13 @@ class PlaybackSessionManager {
 
         const delayMs = Number(process.env.STRM_PRELOAD_SESSION_DELAY_MS ?? 8000)
         if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs))
+
+        // Playback already started while we were waiting: the request has been
+        // served, so a warm now can only compete for the upstream connection.
+        if (this.strmServedSessions.has(session.id)) {
+          Logger.debug('[STRM-PRELOAD] Track already served; skipping session-start warm')
+          return
+        }
 
         // The user may have started playing during the delay; nothing to do then.
         if (session.currentTime > pos + 5) {
@@ -615,8 +631,19 @@ class PlaybackSessionManager {
    *
    * @param {string} sessionId
    */
+  /**
+   * Record that a session has served a track request (playback started).
+   *
+   * @param {string} sessionId
+   */
+  markTrackServed(sessionId) {
+    if (this.strmServedSessions.size > 500) this.strmServedSessions.clear()
+    this.strmServedSessions.add(sessionId)
+  }
+
   async removeSession(sessionId) {
     this.clearPreloadTimer(sessionId)
+    this.strmServedSessions.delete(sessionId)
     const session = this.sessions.find((s) => s.id === sessionId)
     if (!session) return
     if (session.stream) {

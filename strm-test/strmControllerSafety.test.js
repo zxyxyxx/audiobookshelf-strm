@@ -15,7 +15,7 @@ test('LibraryItemController: 详情页预热必须是模块级函数，不能走
   const src = read('server/controllers/LibraryItemController.js')
   assert.match(src, /^function warmFirstTrackOnOpen\(/m, 'warmFirstTrackOnOpen 必须是模块级函数')
   assert.doesNotMatch(src, /this\.warmFirstTrackOnOpen/, 'this 是 ApiRouter，不能调用控制器私有方法')
-  assert.match(src, /try\s*\{\s*\n\s*warmFirstTrackOnOpen\(req\.libraryItem\)/, '调用点必须有 try 保护')
+  assert.match(src, /try\s*\{[\s\S]{0,200}?warmFirstTrackOnOpen\(req\.libraryItem, progress\)/, '调用点必须有 try 保护')
 })
 
 test('三个入口都必须把 serveStrmStream 包在 try/catch 里', () => {
