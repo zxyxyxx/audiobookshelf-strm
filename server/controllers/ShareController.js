@@ -7,7 +7,7 @@ const Database = require('../Database')
 
 const { PlayMethod } = require('../utils/constants')
 const { getAudioMimeTypeFromExtname, encodeUriPath } = require('../utils/fileUtils')
-const { isStrmPath, isUrl, readStrmTarget } = require('../utils/strmUtils')
+const { serveStrmStream } = require('../utils/strmStream')
 const zipHelpers = require('../utils/zipHelpers')
 
 const PlaybackSession = require('../objects/PlaybackSession')
@@ -199,19 +199,13 @@ class ShareController {
     if (!audioTrack) {
       return res.status(404).send('Track not found')
     }
-    let audioTrackPath = audioTrack.metadata.path
-    if (isStrmPath(audioTrackPath)) {
-      try {
-        const strmTarget = await readStrmTarget(audioTrackPath)
-        if (isUrl(strmTarget)) {
-          return res.redirect(strmTarget)
-        }
-        audioTrackPath = strmTarget
-      } catch (error) {
-        Logger.error(`[ShareController] Failed to read STRM file "${audioTrackPath}"`, error)
-        return res.sendStatus(500)
-      }
-    }
+    // Share links used to answer with a 302 to the resolved cloud URL, which
+    // leaked the signed CDN link (and its credentials) to whoever held the share
+    // link, and bypassed ABS so the transfer could not be revoked or counted.
+    // Proxy through ABS instead, exactly like the authenticated endpoints.
+    const streamResult = await serveStrmStream(req, res, audioTrack.metadata.path)
+    if (streamResult.handled) return
+    const audioTrackPath = streamResult.filePath
 
     if (global.XAccel) {
       const encodedURI = encodeUriPath(global.XAccel + audioTrackPath)

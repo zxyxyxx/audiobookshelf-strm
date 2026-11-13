@@ -1,0 +1,74 @@
+# Audiobookshelf STRM —— 海外 ARM64 服务器部署模板
+# Overseas ARM64 server template (Ampere / Graviton / 甲骨文 ARM / Hetzner CAX ...)
+#
+# 与 nas/docker-compose.yml 的区别 / differences from the NAS template:
+#   1) 不依赖 FUSE 挂载：只走 OpenList / rclone 的 HTTP 直链（STRM_DIRECT_URL_MAP）
+#      No FUSE mount: only HTTP direct URLs (STRM_DIRECT_URL_MAP)
+#   2) 超时放宽：跨洲访问国内云盘，15s 经常不够
+#      Longer timeouts: 15s is usually not enough across continents
+#   3) 可选出口代理：STRM_UPSTREAM_PROXY
+#      Optional egress proxy
+#   4) TZ 默认 UTC / UTC by default
+#
+# 使用 / usage:
+#   docker compose pull && docker compose up -d
+#   浏览器访问 http://SERVER_IP:2048
+
+services:
+  audiobookshelf-strm:
+    container_name: audiobookshelf-strm
+    image: ghcr.io/zxyxyxx/audiobookshelf-strm:latest   # 锁定版本可写 :2.37.2
+    platform: linux/arm64                                # 多架构镜像会自动选 arm64，写出来更明确
+    ports:
+      - "2048:80"                                        # 建议前面套 Caddy/Nginx 做 TLS
+    environment:
+      - TZ=UTC
+      # ---- 云直链 / cloud direct URLs ----
+      # OpenList 与 ABS 同机：用 127.0.0.1；不同机：写内网或公网地址
+      - STRM_DIRECT_URL_MAP=/cloud=http://127.0.0.1:5244/d/books
+      # ---- 扫描 / scanning ----
+      - STRM_SCAN_PROBE=0                # 扫描期不 ffprobe（云文件提速）
+      - STRM_SCAN_PROBE_FALLBACK=0       # 没有章节表也不兜底探测
+      - STRM_SCAN_TARGET_SIZE=1          # 读取远端真实大小
+      - STRM_SCAN_SKIP_PROBE_PATHS=/cloud
+      - STRM_ALLOWED_LOCAL_ROOTS=/cloud,/audiobooks   # 安全项：限制 .strm 里的本地路径
+      # ---- 跨洲网络 / cross-border network ----
+      - STRM_STREAM_TIMEOUT_MS=45000     # 播放拉流超时（默认 15s）
+      - STRM_PROBE_TIMEOUT_MS=20000      # 探测超时（默认 10s）
+      - STRM_WARM_TIMEOUT_MS=60000       # 预热/续签超时（默认 30s）
+      - STRM_STREAM_RETRY=1              # 瞬时失败（5xx/连接重置）重试次数
+      - STRM_HTTP_MAX_SOCKETS=64         # keep-alive 连接上限
+      # 出口代理：需要时才取消注释 / uncomment only if needed
+      # - STRM_UPSTREAM_PROXY=http://user:pass@10.0.0.2:7890
+      # - STRM_UPSTREAM_PROXY=direct     # 忽略环境里的 HTTP(S)_PROXY
+      # ---- 首播优化 / first play ----
+      - STRM_WARM_ON_ITEM_OPEN=1         # 打开详情页即预热第一轨
+      - STRM_URL_REFRESH_AHEAD=1         # 签名 URL 到期前自动续签
+      - STRM_URL_REFRESH_AHEAD_MS=60000
+      - STRM_PERSIST_URL_CACHE=1         # 重启/升级后免冷启动（写 /metadata，0600）
+      - STRM_SESSION_RESOLVE_LIMIT=100
+      - STRM_PRELOAD_CONCURRENCY=2
+      - STRM_PRELOAD_DELAY_MS=60000
+      # ---- 日志 / logging ----
+      - STRM_LOG_FULL_PATH=0
+      - STRM_LOG_FULL_REDIRECT_URL=0
+    volumes:
+      - ./config:/config                  # 持久化 / persist
+      - ./metadata:/metadata
+      - /srv/media/audiobooks:/audiobooks:ro
+    restart: unless-stopped
+    # 健康检查继承自镜像（GET /public/healthcheck）。如需覆盖：
+    # healthcheck:
+    #   test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:80/public/healthcheck').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+    #   interval: 30s
+    #   timeout: 5s
+    #   retries: 3
+
+  # 可选：自动跟随镜像更新 / optional auto-update
+  # watchtower:
+  #   image: containrrr/watchtower
+  #   container_name: watchtower
+  #   volumes:
+  #     - /var/run/docker.sock:/var/run/docker.sock
+  #   command: --cleanup --interval 86400 audiobookshelf-strm
+  #   restart: unless-stopped

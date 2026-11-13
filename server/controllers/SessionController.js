@@ -4,7 +4,8 @@ const Logger = require('../Logger')
 const Database = require('../Database')
 const { toNumber, isUUID } = require('../utils/index')
 const { getAudioMimeTypeFromExtname, encodeUriPath } = require('../utils/fileUtils')
-const { isStrmPath, isUrl, readStrmTarget, proxyRemoteStream, getCloudDirectUrl, warmRemoteUrl } = require('../utils/strmUtils')
+const { describePath } = require('../utils/strmUtils')
+const { serveStrmStream } = require('../utils/strmStream')
 const { PlayMethod } = require('../utils/constants')
 
 const ShareManager = require('../managers/ShareManager')
@@ -315,58 +316,25 @@ class SessionController {
       return res.sendStatus(500)
     }
 
-    const user = await Database.userModel.getUserById(playbackSession.userId)
-    Logger.debug(`[SessionController] Serving audio track ${audioTrack.index} for session "${req.params.id}" belonging to user "${user.username}"`)
+    // No user lookup here on purpose: this is the first-byte path for audio and
+    // the user object was only used for a debug log, so skip the DB round trip.
+    Logger.debug(`[SessionController] Serving audio track ${audioTrack.index} for session "${req.params.id}" belonging to user "${playbackSession.userId}"`)
 
-    // Preload next track: warm the STRM -> OpenList -> Quark redirect chain for
-    // the next episode while the current one plays, so the ~10s cold start on
-    // track change becomes a remoteUrlCache hit. Fire-and-forget, never blocks.
-    // Delayed (default 60s) so the warm never races the initial playback
-    // request against OpenList/Quark, which can't handle the concurrency.
-    // Tune with STRM_PRELOAD_DELAY_MS, disable with STRM_PRELOAD_NEXT=0.
-    const nextTrack = playbackSession.audioTracks.find((t) => toNumber(t.index, 1) === audioTrackIndex + 1)
-    const nextTrackPath = nextTrack?.metadata?.path
-    if (nextTrackPath) {
-      const preloadDelayMs = Number(process.env.STRM_PRELOAD_DELAY_MS) || 60_000
-      setTimeout(() => {
-        ;(async () => {
-          try {
-            const target = isStrmPath(nextTrackPath) ? await readStrmTarget(nextTrackPath) : nextTrackPath
-            if (isUrl(target)) await warmRemoteUrl(target)
-          } catch (error) {
-            Logger.warn(`[STRM-PRELOAD] Next-track resolve failed: ${error.message || error}`)
-          }
-        })()
-      }, preloadDelayMs)
-    }
+    // Preload the next track's remote URL while the current one plays, so the
+    // ~10s cold start on track change becomes a remoteUrlCache hit.
+    // Scheduled by PlaybackSessionManager so the timer is cancelled when the
+    // session closes (no orphan warm requests after the user switches books).
+    this.playbackSessionManager.scheduleNextTrackPreload(playbackSession, audioTrackIndex)
 
-    let audioTrackPath = audioTrack.metadata.path
-    Logger.info(`[STRM-PLAY] source-path=${audioTrackPath}`)
-    if (isUrl(audioTrackPath)) {
-      return proxyRemoteStream(audioTrackPath, req, res)
-    }
-    if (isStrmPath(audioTrackPath)) {
-      try {
-        const strmTarget = await readStrmTarget(audioTrackPath)
-        if (isUrl(strmTarget)) {
-          return proxyRemoteStream(strmTarget, req, res)
-        }
-        audioTrackPath = strmTarget
-      } catch (error) {
-        Logger.error(`[SessionController] Failed to read STRM file "${audioTrackPath}"`, error)
-        return res.sendStatus(500)
-      }
-    }
+    // Single entry point: remote URL / .strm / cloud-mapped path are proxied,
+    // anything else falls through to X-Accel or res.sendFile below.
+    const streamResult = await serveStrmStream(req, res, audioTrack.metadata.path)
+    if (streamResult.handled) return
+    const audioTrackPath = streamResult.filePath
 
-    const cloudDirectUrl = getCloudDirectUrl(audioTrackPath)
-    if (cloudDirectUrl) {
-      Logger.info(`[STRM-PLAY] mode=cloud-http-map source-path=${audioTrackPath}`)
-      return proxyRemoteStream(cloudDirectUrl, req, res)
-    }
-
-    // Cloud-mounted files fall through to res.sendFile below.
-    // Express handles Range requests natively — only the bytes the client plays are read via FUSE.
-    // No ffmpeg transcoding, no full-file download.
+    // Files under a cloud mount without a STRM_DIRECT_URL_MAP entry fall through
+    // to res.sendFile below. Express handles Range requests natively — only the
+    // bytes the client plays are read via FUSE. No ffmpeg transcoding.
 
     if (global.XAccel) {
       const encodedURI = encodeUriPath(global.XAccel + audioTrackPath)
@@ -376,7 +344,7 @@ class SessionController {
 
     // Express does not set the correct mimetype for m4b files so use our defined mimetypes if available
     const audioMimeType = getAudioMimeTypeFromExtname(Path.extname(audioTrackPath))
-    Logger.info(`[STRM-PLAY] mode=local-direct source=${audioTrackPath} range=${req.headers.range ? 'yes' : 'no'}`)
+    Logger.info(`[STRM-PLAY] mode=local-direct source=${describePath(audioTrackPath)} range=${req.headers.range ? 'yes' : 'no'}`)
     if (audioMimeType) {
       res.setHeader('Content-Type', audioMimeType)
     }

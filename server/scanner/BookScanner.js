@@ -126,19 +126,24 @@ class BookScanner {
     const strmAudioFiles = includedAudioFiles.filter((audioFile) => this.isStrmAudioFile(audioFile))
     if (!strmAudioFiles.length) return false
 
+    // Chapters are matched to audio files by position, so a hand-edited or
+    // provider-supplied chapter list that is out of order would silently shift
+    // every duration. Sort a copy; never mutate the caller's array.
+    const orderedChapters = [...chapters].sort((a, b) => Number(a?.start) - Number(b?.start))
+
     let hasUpdates = false
     if (includedAudioFiles.length === 1) {
-      const totalDuration = this.getDurationFromChapters(chapters)
+      const totalDuration = this.getDurationFromChapters(orderedChapters)
       const audioFile = includedAudioFiles[0]
       if (totalDuration && this.isStrmAudioFile(audioFile) && (!this.hasPositiveDuration(audioFile) || Math.abs(Number(audioFile.duration) - totalDuration) > 0.01)) {
         audioFile.duration = totalDuration
         hasUpdates = true
       }
-    } else if (includedAudioFiles.length === chapters.length) {
+    } else if (includedAudioFiles.length === orderedChapters.length) {
       includedAudioFiles.forEach((audioFile, index) => {
         if (!this.isStrmAudioFile(audioFile)) return
 
-        const chapterDuration = Number(chapters[index].end) - Number(chapters[index].start)
+        const chapterDuration = Number(orderedChapters[index].end) - Number(orderedChapters[index].start)
         if (!Number.isFinite(chapterDuration) || chapterDuration <= 0) return
 
         const currentDuration = Number(audioFile.duration)
@@ -156,6 +161,17 @@ class BookScanner {
   }
 
   async probeStrmAudioFilesMissingMetadata(audioFiles, libraryItemData, libraryScan, bookTitle) {
+    // STRM_SCAN_PROBE_FALLBACK=0 makes "no probing during scan" an absolute
+    // promise: without a chapter table we leave duration at 0 instead of
+    // silently downloading the book from the cloud just to read its duration.
+    if (process.env.STRM_SCAN_PROBE_FALLBACK === '0') {
+      const missing = audioFiles.filter((audioFile) => this.isStrmAudioFile(audioFile) && !audioFile.exclude && !this.hasPositiveDuration(audioFile))
+      if (missing.length) {
+        libraryScan.addLog(LogLevel.DEBUG, `Skipped fallback probe for ${missing.length} STRM audio file(s) in book "${bookTitle}" (STRM_SCAN_PROBE_FALLBACK=0)`)
+      }
+      return false
+    }
+
     const strmAudioFilesMissingDuration = audioFiles.filter((audioFile) => this.isStrmAudioFile(audioFile) && !audioFile.exclude && !this.hasPositiveDuration(audioFile))
     if (!strmAudioFilesMissingDuration.length) return false
 

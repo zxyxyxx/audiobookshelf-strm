@@ -39,6 +39,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # arm64 用 GitHub 的原生 ARM runner（ubuntu-24.04-arm）：公开仓库免费，
+          # 私有仓库需要付费计划；若跑不起来，删掉下面 arm64 那两行即可只出 amd64 镜像。
+          # Native ARM runner: free for public repos, paid plans for private ones.
           - platform: linux/amd64
             runner: ubuntu-24.04
           - platform: linux/arm64
@@ -52,6 +55,23 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref || github.ref }}
+
+      # Resolve the metadata baked into the image so /api/status can answer
+      # "which upstream release + commit is this?" without guessing.
+      - name: Resolve STRM build metadata
+        id: meta
+        run: |
+          REF="${{ inputs.ref || github.ref_name }}"
+          case "$REF" in
+            strm-v*) UPSTREAM="v${REF#strm-v}" ;;
+            v[0-9]*) UPSTREAM="$REF" ;;
+            [0-9]*)  UPSTREAM="v$REF" ;;
+            *)       UPSTREAM="v$(node -p "require('./package.json').version")" ;;
+          esac
+          echo "upstream=$UPSTREAM" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "built=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          echo "STRM build metadata: upstream=$UPSTREAM sha=$(git rev-parse --short HEAD) ref=$REF"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -69,6 +89,10 @@ jobs:
         with:
           context: .
           platforms: ${{ matrix.platform }}
+          build-args: |
+            GIT_SHA=${{ steps.meta.outputs.sha }}
+            UPSTREAM_TAG=${{ steps.meta.outputs.upstream }}
+            BUILD_TIME=${{ steps.meta.outputs.built }}
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=${{ matrix.platform }}
           cache-to: type=gha,mode=max,scope=${{ matrix.platform }}

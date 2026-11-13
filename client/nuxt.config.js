@@ -28,7 +28,16 @@ module.exports = {
       lang: 'en'
     },
     meta: [{ charset: 'utf-8' }, { name: 'viewport', content: 'width=device-width, initial-scale=1' }, { hid: 'description', name: 'description', content: '' }, { hid: 'robots', name: 'robots', content: 'noindex' }],
-    script: [],
+    script: [
+      // Apply the stored UI theme on <html> before first paint, so a dark theme
+      // never flashes a white page while the client bundle is still loading.
+      // The full theme class is applied to <body> later by plugins/uiTheme.client.js.
+      {
+        hid: 'strm-theme-boot',
+        type: 'text/javascript',
+        innerHTML: `(function(){try{var THEMES=['classic','nebula','obsidian','aurora','ember','porcelain'];var stored=localStorage.getItem('abs-ui-theme');var theme=THEMES.indexOf(stored)>=0?stored:'nebula';document.documentElement.setAttribute('data-ui-theme',theme);}catch(e){}})();`
+      }
+    ],
     link: [
       { rel: 'icon', type: 'image/x-icon', href: routerBasePath + '/favicon.ico' },
       { rel: 'apple-touch-icon', href: routerBasePath + '/ios_icon.png' }
@@ -40,7 +49,9 @@ module.exports = {
   },
 
   // Global CSS: https://go.nuxtjs.dev/config-css
-  css: ['@/assets/tailwind.css', '@/assets/app.css'],
+  // app.css is kept byte-identical to upstream; every STRM customisation lives
+  // in strm-theme.css so upstream edits to app.css can never conflict.
+  css: ['@/assets/tailwind.css', '@/assets/app.css', '@/assets/strm-theme.css'],
 
   // Plugins to run before rendering page: https://go.nuxtjs.dev/config-plugins
   plugins: ['@/plugins/constants.js', '@/plugins/init.client.js', '@/plugins/uiTheme.client.js', '@/plugins/uiLogo.client.js', '@/plugins/axios.js', '@/plugins/toast.js', '@/plugins/utils.js', '@/plugins/i18n.js'],

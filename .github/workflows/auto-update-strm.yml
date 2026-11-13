@@ -78,22 +78,47 @@ jobs:
           fi
 
           git checkout strm
-          if git rebase "$L"; then
-            git tag "$STRMTAG"
-            git push origin strm --force-with-lease
-            git push origin "$STRMTAG"
-            sed -i "s/updated=false/updated=true/" "$GITHUB_OUTPUT"
-            echo "🎉 已把定制改动更新到 $L 并打 tag $STRMTAG"
-          else
-            git rebase --abort || true
-            echo "❌ rebase 到 $L 出现冲突，已中止，未改动 strm"
-            # 同版本若已有未关闭的 issue 则不重复创建
+          BASE_SHA=$(git rev-parse HEAD)
+
+          # 同版本若已有未关闭的 issue 则不重复创建
+          open_issue() {
+            local TITLE="$1"
+            local BODY="$2"
+            local EXIST
             EXIST=$(gh issue list --state open --search "\"$L\" in:title" --json number --jq 'length')
             if [ "$EXIST" = "0" ]; then
-              BODY=$(printf '自动把 strm 定制改动 rebase 到官方 `%s` 时发生**冲突**，已自动中止（strm 分支未被改动，镜像不受影响）。\n\n请在本地解决一次冲突：\n```bash\ncd abs-strm\ngit fetch upstream --tags\ngit checkout strm\ngit rebase %s\n# 手动解决冲突后：\ngit add <冲突文件>\ngit rebase --continue\ngit tag %s\ngit push origin strm --force-with-lease\ngit push origin %s\n```\n推送后会自动构建并推送镜像 `%s` + `latest`。' "$L" "$L" "$STRMTAG" "$STRMTAG" "$VER")
-              gh issue create --title "⚠️ 自动更新冲突：官方 $L 需人工 rebase" --body "$BODY"
+              gh issue create --title "$TITLE" --body "$BODY"
             fi
+          }
+
+          if ! git rebase "$L"; then
+            git rebase --abort || true
+            echo "❌ rebase 到 $L 出现冲突，已中止，未改动 strm"
+            BODY="自动把 strm 定制改动 rebase 到官方 \`$L\` 时发生**冲突**，已自动中止（strm 分支未被改动，镜像不受影响）。"
+            BODY="$BODY"$'\n\n'"请在本地解决一次冲突："
+            BODY="$BODY"$'\n```bash\n'"cd abs-strm"$'\n'"git fetch upstream --tags"$'\n'"git checkout strm"$'\n'"git rebase $L"$'\n'"# 手动解决冲突后："$'\n'"git add <冲突文件>"$'\n'"git rebase --continue"$'\n'"node --test strm-test/"$'\n'"git tag $STRMTAG"$'\n'"git push origin strm --force-with-lease"$'\n'"git push origin $STRMTAG"$'\n```'
+            BODY="$BODY"$'\n\n'"推送后会自动构建并推送镜像 \`$VER\` + \`latest\`。"
+            open_issue "⚠️ 自动更新冲突：官方 $L 需人工 rebase" "$BODY"
+            exit 0
           fi
+
+          # 门禁：rebase 无冲突不代表 STRM 补丁的语义还成立（上游可能重构了扫描器、
+          # 播放会话或 Stream 转码逻辑）。冒烟测试失败就回滚，绝不推送一个坏镜像。
+          if ! node --test strm-test/; then
+            git reset --hard "$BASE_SHA"
+            echo "❌ rebase 到 $L 后 STRM 冒烟测试失败，已回滚到 $BASE_SHA，未推送"
+            BODY="rebase 到官方 \`$L\` **没有冲突**，但 STRM 冒烟测试（\`node --test strm-test/\`）失败，已自动回滚，strm 分支与镜像均未改动。"
+            BODY="$BODY"$'\n\n'"这通常意味着上游重构了 STRM 依赖的代码路径（扫描器 / PlaybackSessionManager / Stream / ffmpegHelpers）。"
+            BODY="$BODY"$'\n\n'"本地排查："$'\n```bash\n'"cd abs-strm"$'\n'"git fetch upstream --tags"$'\n'"git checkout strm"$'\n'"git rebase $L"$'\n'"node --test strm-test/"$'\n```'
+            open_issue "⚠️ STRM 冒烟测试失败：官方 $L" "$BODY"
+            exit 0
+          fi
+
+          git tag "$STRMTAG"
+          git push origin strm --force-with-lease
+          git push origin "$STRMTAG"
+          sed -i "s/updated=false/updated=true/" "$GITHUB_OUTPUT"
+          echo "🎉 已把定制改动更新到 $L 并打 tag $STRMTAG"
 
   build:
     needs: update
