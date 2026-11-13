@@ -11,7 +11,8 @@ const zipHelpers = require('../utils/zipHelpers')
 const { reqSupportsWebp, clampPositiveInt } = require('../utils/index')
 const { ScanResult, AudioMimeType } = require('../utils/constants')
 const { getAudioMimeTypeFromExtname, encodeUriPath } = require('../utils/fileUtils')
-const { isStrmPath, isUrl, readStrmTarget, proxyRemoteStream, getCloudDirectUrl } = require('../utils/strmUtils')
+const { describePath, isStrmPath, isUrl, readStrmTarget, getCloudDirectUrl, warmRemoteUrl } = require('../utils/strmUtils')
+const { serveStrmStream } = require('../utils/strmStream')
 const LibraryItemScanner = require('../scanner/LibraryItemScanner')
 const AudioFileScanner = require('../scanner/AudioFileScanner')
 const Scanner = require('../scanner/Scanner')
@@ -70,6 +71,10 @@ class LibraryItemController {
    */
   async findOne(req, res) {
     const includeEntities = (req.query.include || '').split(',')
+
+    // Opening the detail page is the strongest signal that the user is about to
+    // press Play, so warm the first track's signed URL right now. Fire-and-forget.
+    this.warmFirstTrackOnOpen(req.libraryItem)
     if (req.query.expanded == 1) {
       const item = req.libraryItem.toOldJSONExpanded()
 
@@ -99,6 +104,42 @@ class LibraryItemController {
       return res.json(item)
     }
     res.json(req.libraryItem.toOldJSON())
+  }
+
+  /**
+   * Fire-and-forget: warm the first playable track of an item when its detail
+   * page is opened, so pressing Play does not pay the cold STRM -> OpenList ->
+   * CDN resolution cost (~10s on a cold OpenList cache).
+   *
+   * Disable with STRM_WARM_ON_ITEM_OPEN=0.
+   *
+   * @param {import('../models/LibraryItem')} libraryItem
+   */
+  warmFirstTrackOnOpen(libraryItem) {
+    if (process.env.STRM_WARM_ON_ITEM_OPEN === '0') return
+    const media = libraryItem?.media
+    if (!media) return
+
+    let filePath = null
+    if (Array.isArray(media.audioFiles) && media.audioFiles.length) {
+      const firstAudioFile = media.audioFiles.filter((audioFile) => !audioFile.exclude).sort((a, b) => Number(a.index) - Number(b.index))[0]
+      filePath = firstAudioFile?.metadata?.path || null
+    } else if (Array.isArray(media.podcastEpisodes) && media.podcastEpisodes.length) {
+      filePath = media.podcastEpisodes[0]?.audioFile?.metadata?.path || null
+    }
+    if (!filePath) return
+
+    ;(async () => {
+      try {
+        const target = isStrmPath(filePath) ? await readStrmTarget(filePath) : filePath
+        const remoteUrl = isUrl(target) ? target : getCloudDirectUrl(target)
+        if (!remoteUrl) return
+        Logger.debug(`[STRM-PRELOAD] Warming first track on item open: ${describePath(filePath)}`)
+        await warmRemoteUrl(remoteUrl, { priority: true })
+      } catch (error) {
+        Logger.debug(`[STRM-PRELOAD] Item-open warm skipped: ${error.message || error}`)
+      }
+    })()
   }
 
   /**
@@ -989,26 +1030,11 @@ class LibraryItemController {
    */
   async getLibraryFile(req, res) {
     const libraryFile = req.libraryFile
-    let filePath = libraryFile.metadata.path
-
-    if (isStrmPath(filePath)) {
-      try {
-        const strmTarget = await readStrmTarget(filePath)
-        if (isUrl(strmTarget)) {
-          return proxyRemoteStream(strmTarget, req, res)
-        }
-        filePath = strmTarget
-      } catch (error) {
-        Logger.error(`[LibraryItemController] Failed to read STRM file "${filePath}"`, error)
-        return res.sendStatus(500)
-      }
-    }
-
-    const cloudDirectUrl = getCloudDirectUrl(filePath)
-    if (cloudDirectUrl) {
-      Logger.info(`[STRM-PLAY] mode=cloud-http-map source-path=${filePath}`)
-      return proxyRemoteStream(cloudDirectUrl, req, res)
-    }
+    // Single entry point: remote URL / .strm / cloud-mapped path are proxied,
+    // anything else falls through to X-Accel or res.sendFile below.
+    const streamResult = await serveStrmStream(req, res, libraryFile.metadata.path)
+    if (streamResult.handled) return
+    const filePath = streamResult.filePath
 
     if (global.XAccel) {
       const encodedURI = encodeUriPath(global.XAccel + filePath)
@@ -1018,7 +1044,7 @@ class LibraryItemController {
 
     // Express does not set the correct mimetype for m4b files so use our defined mimetypes if available
     const audioMimeType = getAudioMimeTypeFromExtname(Path.extname(filePath))
-    Logger.info(`[STRM-PLAY] mode=local-direct source=${filePath} range=${req.headers.range ? 'yes' : 'no'}`)
+    Logger.info(`[STRM-PLAY] mode=local-direct source=${describePath(filePath)} range=${req.headers.range ? 'yes' : 'no'}`)
     if (audioMimeType) {
       res.setHeader('Content-Type', audioMimeType)
     }

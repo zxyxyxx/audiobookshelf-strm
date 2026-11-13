@@ -23,6 +23,11 @@ function applyTheme(theme) {
   target.classList.add(`${THEME_CLASS_PREFIX}${normalizedTheme}`)
   target.dataset.uiTheme = normalizedTheme
 
+  // Keep <html> in sync as well: the boot script in nuxt.config.js sets it
+  // before first paint (no white flash) and the CSS uses it for the page
+  // background colour, so runtime theme switches must update both.
+  document.documentElement.setAttribute('data-ui-theme', normalizedTheme)
+
   return normalizedTheme
 }
 

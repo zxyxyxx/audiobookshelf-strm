@@ -15,6 +15,7 @@ const is = require('./libs/requestIp/isJs')
 const fileUtils = require('./utils/fileUtils')
 const { toNumber } = require('./utils/index')
 const { getRequestOrigin } = require('./utils/requestUtils')
+const { getStrmBuildInfo, getStrmBuildLine } = require('./utils/strmBuild')
 const Logger = require('./Logger')
 
 const Auth = require('./Auth')
@@ -253,6 +254,9 @@ class Server {
 
   async start() {
     Logger.info('=== Starting Server ===')
+    // Say exactly which upstream release + commit this image carries, so
+    // "which patch is running?" never needs guessing.
+    Logger.info(`[Server] ${getStrmBuildLine()}`)
 
     this.initProcessEventListeners()
     await this.init()
@@ -387,6 +391,8 @@ class Server {
       const payload = {
         app: 'audiobookshelf',
         serverVersion: version,
+        // Which upstream release + commit this STRM build carries.
+        strmBuild: getStrmBuildInfo(),
         isInit: Database.hasRootUser,
         language: Database.serverSettings.language,
         authMethods: Database.serverSettings.authActiveAuthMethods,

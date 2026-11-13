@@ -25,6 +25,15 @@ class PlaybackSessionManager {
 
     /** @type {PlaybackSession[]} */
     this.sessions = []
+
+    /**
+     * Pending "preload next track" timers, keyed by session id.
+     * Cleared in removeSession so a user switching books does not leave orphan
+     * warm requests hitting the cloud API a minute later.
+     *
+     * @type {Map<string, NodeJS.Timeout>}
+     */
+    this.preloadTimers = new Map()
   }
 
   /**
@@ -111,7 +120,9 @@ class PlaybackSessionManager {
         const url = isStrmPath(strmPath) ? await readStrmTarget(strmPath) : strmPath
         if (isUrl(url)) {
           Logger.info(`[STRM-PRELOAD] Warming resume track at session start (pos=${Math.round(pos)}s)`)
-          await warmRemoteUrl(url)
+          // Priority: the user is about to play this track, so it must not wait
+          // behind queued background pre-warms.
+          await warmRemoteUrl(url, { priority: true })
         }
       } catch (error) {
         Logger.warn(`[STRM-PRELOAD] Session-start warm failed: ${error.message || error}`)
@@ -140,17 +151,84 @@ class PlaybackSessionManager {
   }
 
   async resolveStrmPathsForClient(sessionJson) {
+    // Dedupe first: the same media file can appear in audioTracks AND
+    // libraryItem.media.audioFiles, and a 500-episode podcast would otherwise
+    // mean 500 (sequentially awaited) file reads before the session responds.
     const mediaFiles = [
-      ...(sessionJson.audioTracks || []),
-      ...(sessionJson.libraryItem?.libraryFiles || []),
-      ...(sessionJson.libraryItem?.media?.audioFiles || []),
-      ...(sessionJson.libraryItem?.media?.tracks || [])
+      ...new Set([
+        ...(sessionJson.audioTracks || []),
+        ...(sessionJson.libraryItem?.libraryFiles || []),
+        ...(sessionJson.libraryItem?.media?.audioFiles || []),
+        ...(sessionJson.libraryItem?.media?.tracks || [])
+      ])
     ]
 
     const resolvedPathCache = new Map()
-    for (const mediaFile of mediaFiles) {
-      await this.resolveStrmPathForClient(mediaFile, resolvedPathCache)
+    const batchSize = Number(process.env.STRM_SESSION_RESOLVE_CONCURRENCY) || 8
+    // Resolving every track of a 500-episode podcast before responding delays the
+    // first play for no benefit: the client only needs contentUrl, and the server
+    // re-resolves the real target on demand in getTrack(). Cap the eager work and
+    // leave the rest as plain .strm paths (STRM_SESSION_RESOLVE_LIMIT=0 = no cap).
+    const resolveLimit = Number(process.env.STRM_SESSION_RESOLVE_LIMIT ?? 100)
+    const filesToResolve = resolveLimit > 0 ? mediaFiles.slice(0, resolveLimit) : mediaFiles
+    if (filesToResolve.length < mediaFiles.length) {
+      Logger.debug(`[PlaybackSessionManager] Resolving STRM paths for ${filesToResolve.length}/${mediaFiles.length} files (STRM_SESSION_RESOLVE_LIMIT)`)
     }
+
+    for (let i = 0; i < filesToResolve.length; i += batchSize) {
+      await Promise.all(filesToResolve.slice(i, i + batchSize).map((mediaFile) => this.resolveStrmPathForClient(mediaFile, resolvedPathCache)))
+    }
+  }
+
+  /**
+   * Schedule the "warm the next track's remote URL" timer for a session.
+   * Delayed (default 60s) so the warm never races the initial playback request
+   * against OpenList/Quark, which cannot handle the concurrency.
+   *
+   * Tune with STRM_PRELOAD_DELAY_MS, disable with STRM_PRELOAD_NEXT=0.
+   *
+   * @param {PlaybackSession} playbackSession
+   * @param {number} currentTrackIndex
+   */
+  scheduleNextTrackPreload(playbackSession, currentTrackIndex) {
+    if (!playbackSession || process.env.STRM_PRELOAD_NEXT === '0') return
+
+    const nextTrack = playbackSession.audioTracks.find((t) => Number(t.index ?? 1) === Number(currentTrackIndex) + 1)
+    const nextTrackPath = nextTrack?.metadata?.path
+    if (!nextTrackPath) return
+
+    // Only one pending preload per session: repeated track requests must not
+    // stack timers.
+    this.clearPreloadTimer(playbackSession.id)
+
+    const preloadDelayMs = Number(process.env.STRM_PRELOAD_DELAY_MS) || 60_000
+    const timer = setTimeout(() => {
+      this.preloadTimers.delete(playbackSession.id)
+      ;(async () => {
+        try {
+          const target = isStrmPath(nextTrackPath) ? await readStrmTarget(nextTrackPath) : nextTrackPath
+          if (isUrl(target)) await warmRemoteUrl(target)
+        } catch (error) {
+          Logger.warn(`[STRM-PRELOAD] Next-track resolve failed: ${error.message || error}`)
+        }
+      })()
+    }, preloadDelayMs)
+    // Do not keep the event loop alive just for a speculative warm.
+    if (typeof timer.unref === 'function') timer.unref()
+
+    this.preloadTimers.set(playbackSession.id, timer)
+  }
+
+  /**
+   * Cancel a pending preload timer for a session (no-op when there is none).
+   *
+   * @param {string} sessionId
+   */
+  clearPreloadTimer(sessionId) {
+    const timer = this.preloadTimers.get(sessionId)
+    if (!timer) return
+    clearTimeout(timer)
+    this.preloadTimers.delete(sessionId)
   }
 
   /**
@@ -514,6 +592,7 @@ class PlaybackSessionManager {
    * @param {string} sessionId
    */
   async removeSession(sessionId) {
+    this.clearPreloadTimer(sessionId)
     const session = this.sessions.find((s) => s.id === sessionId)
     if (!session) return
     if (session.stream) {

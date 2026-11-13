@@ -10,6 +10,13 @@ npm-debug.log
 /metadata
 dev.js
 test/
+# STRM fork: test suites, docs and deployment templates are not part of the image
+# context; keeping them out makes the (multi-arch) build context smaller.
+strm-test/
+docs/
+nas/
+.github/
+/build/
 /client/.nuxt/
 /client/dist/
 /dist/

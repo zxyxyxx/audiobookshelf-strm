@@ -8,17 +8,35 @@
 services:
   audiobookshelf-strm:
     container_name: audiobookshelf-strm
-    image: ghcr.io/2222221029/audiobookshelf-strm:latest   # latest=始终最新；要锁版本可写 :2.35.1
+    image: ghcr.io/zxyxyxx/audiobookshelf-strm:latest   # latest=始终最新；要锁版本可写 :2.37.2
     ports:
       - "2048:80"                       # 宿主端口 2048 -> 容器内部 80；按需改左侧
     environment:
       - TZ=Asia/Shanghai
       - STRM_SCAN_PROBE=0               # 扫描时不对音频做 ffprobe 探测（云文件提速）
-      - STRM_SCAN_TARGET_SIZE=1         # 读取 STRM 目标音频真实大小（会增加一次远程访问）
+      - STRM_SCAN_PROBE_FALLBACK=0      # 没有章节表时也不兜底探测（彻底零外连；代价是 duration=0）
+      - STRM_SCAN_TARGET_SIZE=1         # 读取 STRM 目标音频真实大小（会增加远程访问次数）
       - STRM_LOG_FULL_REDIRECT_URL=0    # 改为 1 可在日志显示完整 CDN 签名 URL（有泄露风险）
       - STRM_SCAN_SKIP_PROBE_PATHS=/CloudNAS   # 这些路径下的文件跳过探测
+      # 安全项：STRM 文件里的本地路径必须落在这个根目录内（不设=允许任意绝对路径）
+      - STRM_ALLOWED_LOCAL_ROOTS=/CloudNAS
       # 云直链映射：把容器内本地路径前缀映射为 HTTP 直链，按你的环境修改 IP/端口
       - STRM_DIRECT_URL_MAP=/CloudNAS=http://NAS_IP:19798/dav
+      # 性能项（一般不用改）
+      - STRM_PRELOAD_NEXT=1             # 0=关闭下一轨预热（关了换集会等 ~10 秒）
+      - STRM_PRELOAD_DELAY_MS=60000     # 预热延迟，太小会和首播抢 OpenList
+      - STRM_PRELOAD_CONCURRENCY=2      # 预热并发上限，保护云盘 API
+      - STRM_SESSION_RESOLVE_CONCURRENCY=8   # 打开会话时解析 STRM 路径的并发
+      - STRM_URL_CACHE_MAX=500          # 签名 URL 缓存条数上限（LRU）
+      - STRM_LOG_FULL_PATH=0            # 1=日志打印完整本地路径（默认只打文件名）
+      # 首播优化
+      - STRM_WARM_ON_ITEM_OPEN=1        # 打开书籍详情页就预热第一轨（0=关闭）
+      - STRM_URL_REFRESH_AHEAD=1        # 签名 URL 到期前自动续签（0=关闭）
+      - STRM_URL_REFRESH_AHEAD_MS=60000 # 提前多久续签
+      - STRM_SESSION_RESOLVE_LIMIT=100  # 建会话时最多预解析多少轨（0=不限）
+      - STRM_HTTP_MAX_SOCKETS=64        # 到 OpenList/CDN 的 keep-alive 连接上限
+      # 重启后免冷启动（会把签名 URL 写进 /metadata/strm-url-cache.json，权限 0600）
+      - STRM_PERSIST_URL_CACHE=1
     volumes:
       - ./config:/config                # 配置/数据库（请持久化）
       - ./metadata:/metadata            # 封面等元数据（请持久化）
