@@ -4,7 +4,7 @@ const Logger = require('../Logger')
 const Database = require('../Database')
 const { toNumber, isUUID } = require('../utils/index')
 const { getAudioMimeTypeFromExtname, encodeUriPath } = require('../utils/fileUtils')
-const { describePath } = require('../utils/strmUtils')
+const { describePath, describeRange } = require('../utils/strmUtils')
 const { serveStrmStream } = require('../utils/strmStream')
 const { PlayMethod } = require('../utils/constants')
 
@@ -16,6 +16,32 @@ const ShareManager = require('../managers/ShareManager')
  *
  * @typedef {Request & RequestUserObject} RequestWithUser
  */
+
+/**
+ * Detects a player stuck in a retry loop: the same session + track requested
+ * repeatedly within a few seconds. Without this the log is just a stream of
+ * identical 206s and nobody notices the player is actually failing.
+ */
+const RECENT_TRACK_WINDOW_MS = 10000
+const RECENT_TRACK_LIMIT = 500
+const recentTrackRequests = new Map()
+
+function noteTrackRequest(sessionId, trackIndex) {
+  const key = `${sessionId}:${trackIndex}`
+  const now = Date.now()
+  if (recentTrackRequests.size > RECENT_TRACK_LIMIT) recentTrackRequests.clear()
+
+  const entry = recentTrackRequests.get(key)
+  if (!entry || now - entry.windowStart > RECENT_TRACK_WINDOW_MS) {
+    recentTrackRequests.set(key, { count: 1, windowStart: now })
+    return 1
+  }
+  entry.count++
+  if (entry.count === 4) {
+    Logger.warn(`[STRM-PLAY] Same track requested ${entry.count} times within ${RECENT_TRACK_WINDOW_MS / 1000}s (session=${sessionId} track=${trackIndex}) — the player is probably failing to play it`)
+  }
+  return entry.count
+}
 
 class SessionController {
   constructor() {}
@@ -280,12 +306,13 @@ class SessionController {
    * @param {Response} res
    */
   async getTrack(req, res) {
-    Logger.info(`[STRM-PLAY] request method=${req.method} url=${req.originalUrl} range=${req.headers.range ? 'yes' : 'no'}`)
+    Logger.info(`[STRM-PLAY] request method=${req.method} url=${req.originalUrl} range=${describeRange(req.headers.range)}`)
     const audioTrackIndex = toNumber(req.params.index, null)
     if (audioTrackIndex === null) {
       Logger.error(`[SessionController] Invalid audio track index "${req.params.index}"`)
       return res.sendStatus(400)
     }
+    noteTrackRequest(req.params.id, audioTrackIndex)
 
     const playbackSession = this.playbackSessionManager.getSession(req.params.id)
     if (!playbackSession) {
@@ -356,7 +383,7 @@ class SessionController {
 
     // Express does not set the correct mimetype for m4b files so use our defined mimetypes if available
     const audioMimeType = getAudioMimeTypeFromExtname(Path.extname(audioTrackPath))
-    Logger.info(`[STRM-PLAY] mode=local-direct source=${describePath(audioTrackPath)} range=${req.headers.range ? 'yes' : 'no'}`)
+    Logger.info(`[STRM-PLAY] mode=local-direct source=${describePath(audioTrackPath)} range=${describeRange(req.headers.range)}`)
     if (audioMimeType) {
       res.setHeader('Content-Type', audioMimeType)
     }
