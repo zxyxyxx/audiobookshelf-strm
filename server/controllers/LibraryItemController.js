@@ -11,7 +11,7 @@ const zipHelpers = require('../utils/zipHelpers')
 const { reqSupportsWebp, clampPositiveInt } = require('../utils/index')
 const { ScanResult, AudioMimeType } = require('../utils/constants')
 const { getAudioMimeTypeFromExtname, encodeUriPath } = require('../utils/fileUtils')
-const { describePath, isStrmPath, isUrl, readStrmTarget, getCloudDirectUrl, warmRemoteUrl } = require('../utils/strmUtils')
+const { describePath, describeRange, isStrmPath, isUrl, readStrmTarget, getCloudDirectUrl, warmRemoteUrl } = require('../utils/strmUtils')
 const { serveStrmStream } = require('../utils/strmStream')
 const LibraryItemScanner = require('../scanner/LibraryItemScanner')
 const AudioFileScanner = require('../scanner/AudioFileScanner')
@@ -1069,7 +1069,7 @@ class LibraryItemController {
 
     // Express does not set the correct mimetype for m4b files so use our defined mimetypes if available
     const audioMimeType = getAudioMimeTypeFromExtname(Path.extname(filePath))
-    Logger.info(`[STRM-PLAY] mode=local-direct source=${describePath(filePath)} range=${req.headers.range ? 'yes' : 'no'}`)
+    Logger.info(`[STRM-PLAY] mode=local-direct source=${describePath(filePath)} range=${describeRange(req.headers.range)}`)
     if (audioMimeType) {
       res.setHeader('Content-Type', audioMimeType)
     }

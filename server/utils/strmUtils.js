@@ -378,6 +378,20 @@ function describePath(value) {
   return Path.basename(value)
 }
 
+/**
+ * Render a Range header for logs. `bytes=0-` means the player restarted from the
+ * beginning (a retry loop); `bytes=123-` means it seeked. Without the value the
+ * log cannot tell those apart.
+ *
+ * @param {string} [range]
+ * @returns {string}
+ */
+function describeRange(range) {
+  if (!range) return 'none'
+  return String(range).slice(0, 40)
+}
+module.exports.describeRange = describeRange
+
 // Cached parse of STRM_DIRECT_URL_MAP. getCloudDirectUrl is called for every
 // audio file during direct-play checks, so re-parsing the env var each time is
 // pure overhead on large libraries.
@@ -765,7 +779,7 @@ async function proxyRemoteStream(remoteUrl, req, res) {
   const redirectTarget = process.env.STRM_LOG_FULL_REDIRECT_URL === '1' && resolvedUrl ? resolvedUrl : `${resolvedHost}${wasRedirected ? ' (signed query redacted)' : ''}`
   Logger.info(`[STRM-PLAY] redirect=${wasRedirected ? 'yes' : 'no'} target=${redirectTarget}`)
   Logger.info(
-    `[STRM-PLAY] mode=proxy source=${sourceHost} resolved=${resolvedHost} cache=${cachedUrl ? 'hit' : 'miss'} status=${remoteRes.status} range=${req.headers.range ? 'yes' : 'no'}`
+    `[STRM-PLAY] mode=proxy source=${sourceHost} resolved=${resolvedHost} cache=${cachedUrl ? 'hit' : 'miss'} status=${remoteRes.status} range=${describeRange(req.headers.range)}`
   )
 
   const passthroughHeaders = ['content-type', 'content-length', 'content-range', 'accept-ranges', 'last-modified', 'etag', 'content-disposition']
@@ -799,8 +813,14 @@ async function proxyRemoteStream(remoteUrl, req, res) {
   })
   remoteRes.data.pipe(res)
 
-  req.on('close', () => {
-    remoteRes.data.destroy()
+  // Destroy the upstream stream when the *response* goes away (client aborted),
+  // not on req 'close': a GET request's stream is already complete by the time
+  // the body is streaming, and destroying on that would truncate playback.
+  res.on('close', () => {
+    if (res.writableEnded) return
+    try {
+      remoteRes.data.destroy()
+    } catch (error) {}
   })
 }
 module.exports.proxyRemoteStream = proxyRemoteStream
