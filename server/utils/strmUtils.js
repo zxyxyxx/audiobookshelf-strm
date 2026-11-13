@@ -379,6 +379,36 @@ function describePath(value) {
 }
 
 /**
+ * Pick the audio file that contains `currentTime`, using the cumulative
+ * durations of the tracklist. Used to prewarm the track a user will actually
+ * resume, instead of blindly warming the first file.
+ *
+ * @param {Array<{index:number, duration:number, exclude?:boolean}>} audioFiles
+ * @param {number} currentTime seconds
+ * @returns {number} index into the sorted, non-excluded array (-1 when empty)
+ */
+function pickResumeFileIndex(audioFiles, currentTime) {
+  const files = (Array.isArray(audioFiles) ? audioFiles : [])
+    .filter((audioFile) => audioFile && !audioFile.exclude)
+    .sort((a, b) => Number(a.index) - Number(b.index))
+  if (!files.length) return -1
+
+  const position = Number(currentTime)
+  if (!Number.isFinite(position) || position <= 0) return 0
+
+  let offset = 0
+  for (let i = 0; i < files.length; i++) {
+    const duration = Number(files[i].duration)
+    const known = Number.isFinite(duration) && duration > 0
+    if (known && position < offset + duration) return i
+    if (known) offset += duration
+  }
+  // Position past everything we know about: the last file is the best guess.
+  return offset > 0 ? files.length - 1 : 0
+}
+module.exports.pickResumeFileIndex = pickResumeFileIndex
+
+/**
  * Render a Range header for logs. `bytes=0-` means the player restarted from the
  * beginning (a retry loop); `bytes=123-` means it seeked. Without the value the
  * log cannot tell those apart.
@@ -924,7 +954,7 @@ module.exports.cancelWarm = cancelWarm
  * so a track request doesn't start a duplicate upstream resolution while
  * a warm is already running. Returns the cached URL if available.
  */
-async function waitForWarm(remoteUrl, timeoutMs = 10000) {
+async function waitForWarm(remoteUrl, timeoutMs = Number(process.env.STRM_WAIT_WARM_MS) || 20000) {
   if (!warmingUrls.has(remoteUrl)) return getCachedRemoteUrl(remoteUrl)
   const start = Date.now()
   while (warmingUrls.has(remoteUrl) && Date.now() - start < timeoutMs) {

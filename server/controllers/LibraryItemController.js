@@ -11,7 +11,7 @@ const zipHelpers = require('../utils/zipHelpers')
 const { reqSupportsWebp, clampPositiveInt } = require('../utils/index')
 const { ScanResult, AudioMimeType } = require('../utils/constants')
 const { getAudioMimeTypeFromExtname, encodeUriPath } = require('../utils/fileUtils')
-const { describePath, describeRange, isStrmPath, isUrl, readStrmTarget, getCloudDirectUrl, warmRemoteUrl } = require('../utils/strmUtils')
+const { describePath, describeRange, isStrmPath, isUrl, readStrmTarget, getCloudDirectUrl, warmRemoteUrl, pickResumeFileIndex } = require('../utils/strmUtils')
 const { serveStrmStream } = require('../utils/strmStream')
 const LibraryItemScanner = require('../scanner/LibraryItemScanner')
 const AudioFileScanner = require('../scanner/AudioFileScanner')
@@ -58,9 +58,13 @@ function ensureUserCanAccessLibraryItemsForBatch(req, res, libraryItems) {
 }
 
 /**
- * Fire-and-forget: warm the first playable track of an item when its detail page
- * is opened, so pressing Play does not pay the cold STRM -> OpenList -> CDN
- * resolution cost (~10s on a cold OpenList cache).
+ * Fire-and-forget: warm the track the user is going to resume when the detail
+ * page is opened, so pressing Play does not pay the cold STRM -> OpenList -> CDN
+ * resolution cost (~15s on a cold OpenList cache).
+ *
+ * Warming the *resume* track matters: a 1500-track book resumes at track 1080,
+ * and warming track 1 helps nobody. The position comes from the user's media
+ * progress and is mapped onto the tracklist with cumulative durations.
  *
  * Deliberately a module-level function, not a class method: the routes bind
  * `this` to the ApiRouter, so `this.<controllerMethod>` is undefined there and a
@@ -69,20 +73,24 @@ function ensureUserCanAccessLibraryItemsForBatch(req, res, libraryItems) {
  * Disable with STRM_WARM_ON_ITEM_OPEN=0.
  *
  * @param {import('../models/LibraryItem')} libraryItem
+ * @param {{ currentTime?: number, episodeId?: string|null }} [progress]
  */
-function warmFirstTrackOnOpen(libraryItem) {
+function warmFirstTrackOnOpen(libraryItem, progress = null) {
   if (process.env.STRM_WARM_ON_ITEM_OPEN === '0') return
   const media = libraryItem?.media
   if (!media) return
 
+  const position = Number(progress?.currentTime) || 0
   let filePath = null
+
   if (Array.isArray(media.audioFiles) && media.audioFiles.length) {
-    const firstAudioFile = media.audioFiles
-      .filter((audioFile) => audioFile && !audioFile.exclude)
-      .sort((a, b) => Number(a.index) - Number(b.index))[0]
-    filePath = firstAudioFile?.metadata?.path || null
+    const files = media.audioFiles.filter((audioFile) => audioFile && !audioFile.exclude).sort((a, b) => Number(a.index) - Number(b.index))
+    const index = pickResumeFileIndex(files, position)
+    filePath = files[index]?.metadata?.path || null
   } else if (Array.isArray(media.podcastEpisodes) && media.podcastEpisodes.length) {
-    filePath = media.podcastEpisodes[0]?.audioFile?.metadata?.path || null
+    const episodeId = progress?.episodeId
+    const episode = (episodeId && media.podcastEpisodes.find((ep) => ep.id === episodeId)) || media.podcastEpisodes[0]
+    filePath = episode?.audioFile?.metadata?.path || null
   }
   if (!filePath) return
 
@@ -91,7 +99,9 @@ function warmFirstTrackOnOpen(libraryItem) {
       const target = isStrmPath(filePath) ? await readStrmTarget(filePath) : filePath
       const remoteUrl = isUrl(target) ? target : getCloudDirectUrl(target)
       if (!remoteUrl) return
-      Logger.debug(`[STRM-PRELOAD] Warming first track on item open: ${describePath(filePath)}`)
+      // INFO: this is the one line that tells you whether the warm targeted the
+      // track the player later asked for.
+      Logger.info(`[STRM-PRELOAD] Warming resume track on item open (pos=${Math.round(position)}s) source=${describePath(filePath)}`)
       await warmRemoteUrl(remoteUrl, { priority: true })
     } catch (error) {
       Logger.debug(`[STRM-PRELOAD] Item-open warm skipped: ${error.message || error}`)
@@ -115,7 +125,9 @@ class LibraryItemController {
     const includeEntities = (req.query.include || '').split(',')
 
     // Opening the detail page is the strongest signal that the user is about to
-    // press Play, so warm the first track's signed URL right now.
+    // press Play, so warm the *resume* track's signed URL right now (the position
+    // comes from their media progress — warming track 1 of a 1500-track book
+    // helps nobody).
     //
     // IMPORTANT: these routes are registered as `LibraryItemController.findOne.bind(this)`
     // where `this` is the ApiRouter, NOT an instance of this class. Any `this.foo`
@@ -124,7 +136,8 @@ class LibraryItemController {
     // calls process.exit(1) — the whole server dies (the web client shows
     // "网络已断开"). Keep this a module-level call and keep it guarded.
     try {
-      warmFirstTrackOnOpen(req.libraryItem)
+      const progress = req.user.getOldMediaProgress(req.libraryItem.id, req.query.episode || null)
+      warmFirstTrackOnOpen(req.libraryItem, progress)
     } catch (error) {
       Logger.warn(`[STRM-PRELOAD] Item-open warm failed: ${error.message || error}`)
     }
