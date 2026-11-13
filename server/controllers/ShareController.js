@@ -203,7 +203,15 @@ class ShareController {
     // leaked the signed CDN link (and its credentials) to whoever held the share
     // link, and bypassed ABS so the transfer could not be revoked or counted.
     // Proxy through ABS instead, exactly like the authenticated endpoints.
-    const streamResult = await serveStrmStream(req, res, audioTrack.metadata.path)
+    // Guarded: an unhandled rejection here would exit the process (Server.js).
+    let streamResult
+    try {
+      streamResult = await serveStrmStream(req, res, audioTrack.metadata.path)
+    } catch (error) {
+      Logger.error(`[STRM-PLAY] serveStrmStream failed (share): ${error.message || error}`)
+      if (!res.headersSent) return res.sendStatus(502)
+      return res.destroy(error)
+    }
     if (streamResult.handled) return
     const audioTrackPath = streamResult.filePath
 

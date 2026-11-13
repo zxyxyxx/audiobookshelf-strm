@@ -57,6 +57,48 @@ function ensureUserCanAccessLibraryItemsForBatch(req, res, libraryItems) {
   return true
 }
 
+/**
+ * Fire-and-forget: warm the first playable track of an item when its detail page
+ * is opened, so pressing Play does not pay the cold STRM -> OpenList -> CDN
+ * resolution cost (~10s on a cold OpenList cache).
+ *
+ * Deliberately a module-level function, not a class method: the routes bind
+ * `this` to the ApiRouter, so `this.<controllerMethod>` is undefined there and a
+ * throw inside the async handler would take the whole process down.
+ *
+ * Disable with STRM_WARM_ON_ITEM_OPEN=0.
+ *
+ * @param {import('../models/LibraryItem')} libraryItem
+ */
+function warmFirstTrackOnOpen(libraryItem) {
+  if (process.env.STRM_WARM_ON_ITEM_OPEN === '0') return
+  const media = libraryItem?.media
+  if (!media) return
+
+  let filePath = null
+  if (Array.isArray(media.audioFiles) && media.audioFiles.length) {
+    const firstAudioFile = media.audioFiles
+      .filter((audioFile) => audioFile && !audioFile.exclude)
+      .sort((a, b) => Number(a.index) - Number(b.index))[0]
+    filePath = firstAudioFile?.metadata?.path || null
+  } else if (Array.isArray(media.podcastEpisodes) && media.podcastEpisodes.length) {
+    filePath = media.podcastEpisodes[0]?.audioFile?.metadata?.path || null
+  }
+  if (!filePath) return
+
+  ;(async () => {
+    try {
+      const target = isStrmPath(filePath) ? await readStrmTarget(filePath) : filePath
+      const remoteUrl = isUrl(target) ? target : getCloudDirectUrl(target)
+      if (!remoteUrl) return
+      Logger.debug(`[STRM-PRELOAD] Warming first track on item open: ${describePath(filePath)}`)
+      await warmRemoteUrl(remoteUrl, { priority: true })
+    } catch (error) {
+      Logger.debug(`[STRM-PRELOAD] Item-open warm skipped: ${error.message || error}`)
+    }
+  })()
+}
+
 class LibraryItemController {
   constructor() {}
 
@@ -73,8 +115,19 @@ class LibraryItemController {
     const includeEntities = (req.query.include || '').split(',')
 
     // Opening the detail page is the strongest signal that the user is about to
-    // press Play, so warm the first track's signed URL right now. Fire-and-forget.
-    this.warmFirstTrackOnOpen(req.libraryItem)
+    // press Play, so warm the first track's signed URL right now.
+    //
+    // IMPORTANT: these routes are registered as `LibraryItemController.findOne.bind(this)`
+    // where `this` is the ApiRouter, NOT an instance of this class. Any `this.foo`
+    // that only exists on the controller is therefore undefined here, and an async
+    // handler that throws rejects into Server's unhandledRejection handler, which
+    // calls process.exit(1) — the whole server dies (the web client shows
+    // "网络已断开"). Keep this a module-level call and keep it guarded.
+    try {
+      warmFirstTrackOnOpen(req.libraryItem)
+    } catch (error) {
+      Logger.warn(`[STRM-PRELOAD] Item-open warm failed: ${error.message || error}`)
+    }
     if (req.query.expanded == 1) {
       const item = req.libraryItem.toOldJSONExpanded()
 
@@ -104,42 +157,6 @@ class LibraryItemController {
       return res.json(item)
     }
     res.json(req.libraryItem.toOldJSON())
-  }
-
-  /**
-   * Fire-and-forget: warm the first playable track of an item when its detail
-   * page is opened, so pressing Play does not pay the cold STRM -> OpenList ->
-   * CDN resolution cost (~10s on a cold OpenList cache).
-   *
-   * Disable with STRM_WARM_ON_ITEM_OPEN=0.
-   *
-   * @param {import('../models/LibraryItem')} libraryItem
-   */
-  warmFirstTrackOnOpen(libraryItem) {
-    if (process.env.STRM_WARM_ON_ITEM_OPEN === '0') return
-    const media = libraryItem?.media
-    if (!media) return
-
-    let filePath = null
-    if (Array.isArray(media.audioFiles) && media.audioFiles.length) {
-      const firstAudioFile = media.audioFiles.filter((audioFile) => !audioFile.exclude).sort((a, b) => Number(a.index) - Number(b.index))[0]
-      filePath = firstAudioFile?.metadata?.path || null
-    } else if (Array.isArray(media.podcastEpisodes) && media.podcastEpisodes.length) {
-      filePath = media.podcastEpisodes[0]?.audioFile?.metadata?.path || null
-    }
-    if (!filePath) return
-
-    ;(async () => {
-      try {
-        const target = isStrmPath(filePath) ? await readStrmTarget(filePath) : filePath
-        const remoteUrl = isUrl(target) ? target : getCloudDirectUrl(target)
-        if (!remoteUrl) return
-        Logger.debug(`[STRM-PRELOAD] Warming first track on item open: ${describePath(filePath)}`)
-        await warmRemoteUrl(remoteUrl, { priority: true })
-      } catch (error) {
-        Logger.debug(`[STRM-PRELOAD] Item-open warm skipped: ${error.message || error}`)
-      }
-    })()
   }
 
   /**
@@ -1032,7 +1049,15 @@ class LibraryItemController {
     const libraryFile = req.libraryFile
     // Single entry point: remote URL / .strm / cloud-mapped path are proxied,
     // anything else falls through to X-Accel or res.sendFile below.
-    const streamResult = await serveStrmStream(req, res, libraryFile.metadata.path)
+    // Guarded: an unhandled rejection here would exit the process (see Server.js).
+    let streamResult
+    try {
+      streamResult = await serveStrmStream(req, res, libraryFile.metadata.path)
+    } catch (error) {
+      Logger.error(`[STRM-PLAY] serveStrmStream failed: ${error.message || error}`)
+      if (!res.headersSent) return res.sendStatus(502)
+      return res.destroy(error)
+    }
     if (streamResult.handled) return
     const filePath = streamResult.filePath
 

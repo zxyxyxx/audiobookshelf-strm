@@ -324,11 +324,23 @@ class SessionController {
     // ~10s cold start on track change becomes a remoteUrlCache hit.
     // Scheduled by PlaybackSessionManager so the timer is cancelled when the
     // session closes (no orphan warm requests after the user switches books).
-    this.playbackSessionManager.scheduleNextTrackPreload(playbackSession, audioTrackIndex)
+    // Guarded: a throw inside this async handler exits the process (Server.js).
+    try {
+      this.playbackSessionManager.scheduleNextTrackPreload(playbackSession, audioTrackIndex)
+    } catch (error) {
+      Logger.warn(`[STRM-PRELOAD] Unable to schedule next-track preload: ${error.message || error}`)
+    }
 
     // Single entry point: remote URL / .strm / cloud-mapped path are proxied,
     // anything else falls through to X-Accel or res.sendFile below.
-    const streamResult = await serveStrmStream(req, res, audioTrack.metadata.path)
+    let streamResult
+    try {
+      streamResult = await serveStrmStream(req, res, audioTrack.metadata.path)
+    } catch (error) {
+      Logger.error(`[STRM-PLAY] serveStrmStream failed: ${error.message || error}`)
+      if (!res.headersSent) return res.sendStatus(502)
+      return res.destroy(error)
+    }
     if (streamResult.handled) return
     const audioTrackPath = streamResult.filePath
 
