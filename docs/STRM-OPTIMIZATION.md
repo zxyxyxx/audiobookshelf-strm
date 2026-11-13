@@ -1,7 +1,7 @@
 # STRM 定制版优化说明 / STRM Fork Optimization Notes
 
 > 基线 / Base: `strm` @ `467e7ce` (upstream v2.37.2 + STRM patches)
-> 本次改动 / This change set: **16 files modified, 12 files added**, 44 unit tests
+> 本次改动 / This change set: **17 files modified, 13 files added**, 48 unit tests
 > 四轮 / four passes: STRM 播放链路 · 主题 · 首播 · arm64+海外（含可追溯与瘦身）
 
 ---
@@ -330,7 +330,7 @@ git push origin strm --force-with-lease && git push origin strm-v2.37.2.1
 
 ---
 
-## 11. 测试覆盖 / Test coverage（44 cases）
+## 11. 测试覆盖 / Test coverage（48 cases）
 
 | 文件 / File | 数量 | 覆盖 / Covers |
 |---|---|---|
@@ -340,6 +340,42 @@ git push origin strm --force-with-lease && git push origin strm-v2.37.2.1
 | `strm-test/strmPersistCache.test.js` | 4 | 落盘/恢复、过期条目丢弃、损坏文件容错、写盘过滤 |
 | `strm-test/strmNetwork.test.js` | 9 | 出口代理（direct/带认证/非法值）、可配超时、503/ECONNRESET 重试、`STRM_STREAM_RETRY=0`、403 不重试、瞬时判定表 |
 | `strm-test/strmBuild.test.js` | 4 | 构建元数据（默认/注入/空白值）+ **文档一致性**（每个 `STRM_*` 变量必须在 `nas/README.md` 里） |
+| `strm-test/strmControllerSafety.test.js` | 4 | **防进程自杀**：详情页预热必须是模块级函数、三个入口的 `serveStrmStream` 必须 try 包裹、`this.*` 成员白名单 |
+
+---
+
+## 14. 修复记录 / Fix log
+
+### 14.1 点击书籍详情 → 服务端进程退出 → 网页显示「网络已断开」
+
+**症状 / Symptom**：点开书籍详情页或点播放，网页立刻提示「网络已断开」，容器日志里能看到 `Unhandled rejection` 后进程重启。
+
+**根因 / Root cause**：
+
+```
+ApiRouter:  this.router.get('/items/:id', LibraryItemController.findOne.bind(this))
+                                                              ↑ this = ApiRouter 实例
+
+findOne():  this.warmFirstTrackOnOpen(req.libraryItem)
+            ↑ ApiRouter 上没有这个方法 → TypeError
+
+TypeError 在 async handler 里 → Express 4 不捕获 → unhandledRejection
+Server.js: process.on('unhandledRejection', …) → Logger.fatal + process.exit(1)
+            ↑ 进程退出 → socket 断开 → 客户端 ToastSocketDisconnected = 「网络已断开」
+```
+
+**修法 / Fix**：
+
+| 改动 | 说明 |
+|---|---|
+| 把 `warmFirstTrackOnOpen` 从类方法改成**模块级函数** | 不依赖 `this`，与路由的绑定方式解耦 |
+| 调用点加 `try/catch` | 即使助手内部出错也只是少一次预热 |
+| 三个入口的 `serveStrmStream` 全部 `try/catch` + `502` | STRM 的任何异常都不再能杀死进程 |
+| `scheduleNextTrackPreload` 同样包裹 | 同上 |
+| 新增 `strmControllerSafety.test.js`（4 例） | 静态守卫：禁止 `this.<控制器私有方法>`、要求 try 包裹、`this.*` 白名单 |
+
+> 教训 / Lesson：这个仓库的 `Server.js` 把**任何**未捕获的 Promise 拒绝都当成致命错误直接 `process.exit(1)`。所以新增的每个 async 调用点都必须自带 `try/catch`——测试里那 4 个静态守卫就是为此加的。
+
 
 ---
 
