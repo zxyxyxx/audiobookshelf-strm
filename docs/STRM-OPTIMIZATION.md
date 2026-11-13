@@ -432,8 +432,8 @@ build-strm-image.yml  ──build-args──>  Dockerfile ARG/ENV  ──>  proc
                                               启动日志        /api/status
 ```
 
-`UPSTREAM_TAG` 由 workflow 从 ref 推导：`strm-v2.37.2` / `2.37.2` / `v2.37.2` 都会归一成 `v2.37.2`；手动触发且 ref 不是版本号时，退回 `package.json` 的版本。
-The workflow normalises any of `strm-v2.37.2`, `2.37.2`, `v2.37.2` to `v2.37.2`, falling back to `package.json`.
+`UPSTREAM_TAG` 由 workflow 从 ref 推导：`strm-v2.37.2` / `2.37.2` / `v2.37.2` 都归一成 `v2.37.2`；fork 的补丁 tag `strm-v2.37.2.1` 会砍掉第四段，仍报上游 `v2.37.2`；ref 不是版本号时退回 `package.json`。
+The workflow normalises `strm-v2.37.2`, `2.37.2`, `v2.37.2` to `v2.37.2`; a fork patch tag like `strm-v2.37.2.1` drops the 4th component and still reports upstream `v2.37.2`, falling back to `package.json` otherwise.
 
 ### 13.2 瘦身清单 / What was removed
 

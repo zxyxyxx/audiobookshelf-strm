@@ -68,6 +68,9 @@ jobs:
             [0-9]*)  UPSTREAM="v$REF" ;;
             *)       UPSTREAM="v$(node -p "require('./package.json').version")" ;;
           esac
+          # A fork patch tag (strm-v2.37.2.1) still tracks upstream v2.37.2:
+          # drop the 4th numeric component so the reported base stays truthful.
+          UPSTREAM=$(printf '%s' "$UPSTREAM" | sed -E 's/^v([0-9]+)\.([0-9]+)\.([0-9]+)(\.[0-9]+)*$/v\1.\2.\3/')
           echo "upstream=$UPSTREAM" >> "$GITHUB_OUTPUT"
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "built=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
