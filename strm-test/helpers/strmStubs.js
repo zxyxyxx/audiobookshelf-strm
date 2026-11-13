@@ -13,8 +13,14 @@ function makeAxios() {
 
   const axios = (config) => {
     calls.push(config)
-    if (!state.handler) return Promise.reject(new Error('no axios handler registered'))
-    return state.handler(config)
+    const work = state.handler ? state.handler(config) : Promise.reject(new Error('no axios handler registered'))
+    // Honour axios 0.x CancelToken so cancelWarm() can be tested.
+    const cancelPromise = config?.cancelToken?.promise
+    if (cancelPromise) {
+      work.catch(() => {})
+      return Promise.race([work, cancelPromise])
+    }
+    return work
   }
   axios.calls = calls
   axios.setHandler = (fn) => {
@@ -24,6 +30,23 @@ function makeAxios() {
     calls.length = 0
   }
   axios.callsTo = (url) => calls.filter((c) => c.url === url)
+
+  axios.CancelToken = {
+    source() {
+      let cancelFn
+      const token = {}
+      token.promise = new Promise((resolve, reject) => {
+        cancelFn = (message) => {
+          const error = new Error(message || 'canceled')
+          error.__CANCEL__ = true
+          error.code = 'ERR_CANCELED'
+          reject(error)
+        }
+      })
+      return { token, cancel: cancelFn }
+    }
+  }
+  axios.isCancel = (error) => !!error?.__CANCEL__
 
   return axios
 }

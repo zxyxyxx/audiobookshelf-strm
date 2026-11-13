@@ -37,6 +37,8 @@ services:
       - STRM_PROBE_TIMEOUT_MS=20000      # 探测超时（默认 10s）
       - STRM_WARM_TIMEOUT_MS=60000       # 预热/续签超时（默认 30s）
       - STRM_STREAM_RETRY=1              # 瞬时失败（5xx/连接重置）重试次数
+      - STRM_RETRY_FAST_FAIL_MS=5000     # 只有快失败才重试（超时后再等一轮没意义）
+      - STRM_PRELOAD_SESSION_DELAY_MS=8000   # 会话启动预热延迟；别调小，会和首播抢 OpenList
       - STRM_HTTP_MAX_SOCKETS=64         # keep-alive 连接上限
       # 出口代理：需要时才取消注释 / uncomment only if needed
       # - STRM_UPSTREAM_PROXY=http://user:pass@10.0.0.2:7890

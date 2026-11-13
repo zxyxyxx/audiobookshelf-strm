@@ -97,26 +97,50 @@ class PlaybackSessionManager {
     res.json(sessionJson)
 
     // Preload the resume track's remote URL at session creation (user tapped the
-    // book, hasn't hit play yet). This gives the slow OpenList -> Quark chain a
-    // head start so the first play doesn't hit a cold cache. Fire-and-forget.
-    // If the track request arrives while warming, it waits for the warm
-    // (see waitForWarm) instead of starting a duplicate upstream request.
+    // book, hasn't hit play yet). Fire-and-forget.
+    //
+    // Two guards learned the hard way (2026-11-14):
+    //  - OpenList/Quark cannot serve a speculative warm and the real play request
+    //    at the same time: one of them answers 500 or hangs until timeout. So the
+    //    warm waits STRM_PRELOAD_SESSION_DELAY_MS (default 8s) before starting, by
+    //    which time the real request has usually resolved and cached the URL.
+    //    A request that arrives later still cancels the warm (cancelWarm).
+    //  - If the track durations are unknown the resume track cannot be matched;
+    //    warming tracks[0] would warm the wrong file and double the upstream load.
+    //    Skip instead.
     ;(async () => {
       try {
         const tracks = session.audioTracks || []
         if (!tracks.length) return
         const pos = Number(session.currentTime) || 0
-        let target = tracks[0]
+        let target = null
         for (const t of tracks) {
           const start = Number(t.startOffset) || 0
           const dur = Number(t.duration) || 0
-          if (pos >= start && pos < start + dur) {
+          if (dur > 0 && pos >= start && pos < start + dur) {
             target = t
             break
           }
         }
+        if (!target) {
+          if (pos > 0) {
+            Logger.debug('[STRM-PRELOAD] Resume track could not be matched (durations unavailable); skipping session-start warm')
+            return
+          }
+          target = tracks[0]
+        }
         const strmPath = target?.metadata?.path
         if (!strmPath) return
+
+        const delayMs = Number(process.env.STRM_PRELOAD_SESSION_DELAY_MS ?? 8000)
+        if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs))
+
+        // The user may have started playing during the delay; nothing to do then.
+        if (session.currentTime > pos + 5) {
+          Logger.debug('[STRM-PRELOAD] Playback already started; skipping session-start warm')
+          return
+        }
+
         const url = isStrmPath(strmPath) ? await readStrmTarget(strmPath) : strmPath
         if (isUrl(url)) {
           Logger.info(`[STRM-PRELOAD] Warming resume track at session start (pos=${Math.round(pos)}s)`)

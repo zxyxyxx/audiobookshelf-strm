@@ -126,6 +126,8 @@ git push origin strm --force-with-lease && git push origin strm-vX.Y.Z
 | `STRM_PROBE_TIMEOUT_MS` | `10000` | 探测/取大小超时 | 跨洲建议 `20000` |
 | `STRM_WARM_TIMEOUT_MS` | `30000` | 预热与续签超时 | 跨洲建议 `60000` |
 | `STRM_STREAM_RETRY` | `1` | 瞬时失败（5xx/连接重置）重试次数 | `0`=关闭；403/404 永不重试 |
+| `STRM_RETRY_FAST_FAIL_MS` | `5000` | 只有「快失败」才重试 | 15s 超时后再等一轮纯属折磨用户；调大＝更爱重试 |
+| `STRM_PRELOAD_SESSION_DELAY_MS` | `8000` | 会话启动预热的延迟 | **别调小**：预热和首播请求同时打 OpenList 会 500/超时 |
 | `STRM_UPSTREAM_PROXY` | 空 | 出口代理 `http://user:pass@host:port` | `direct`=忽略环境里的 `HTTP(S)_PROXY` |
 | `STRM_GIT_SHA` / `STRM_UPSTREAM_TAG` / `STRM_BUILD_TIME` | 构建注入 | 镜像构建时由 CI 自动写入，`/api/status` 的 `strmBuild` 与启动日志会显示 | **不用手动设置**；排障时用它确认镜像是哪个补丁 |
 | `STRM_HTTP_MAX_SOCKETS` | `64` | 到 OpenList/CDN 的 keep-alive 连接上限 | 首播少一次 TCP/TLS 握手 |
