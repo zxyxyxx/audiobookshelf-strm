@@ -34,6 +34,13 @@ jobs:
           ref: strm
           fetch-depth: 0
 
+      # 固定 Node 版本：runner 自带的 Node 版本会把 `node --test <dir>` 当成
+      # 模块去 require，导致 "Cannot find module .../strm-test" 而误判测试失败。
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
       - name: 配置 git 身份
         run: |
           git config user.name "strm-auto-update[bot]"
@@ -96,7 +103,7 @@ jobs:
             echo "❌ rebase 到 $L 出现冲突，已中止，未改动 strm"
             BODY="自动把 strm 定制改动 rebase 到官方 \`$L\` 时发生**冲突**，已自动中止（strm 分支未被改动，镜像不受影响）。"
             BODY="$BODY"$'\n\n'"请在本地解决一次冲突："
-            BODY="$BODY"$'\n```bash\n'"cd abs-strm"$'\n'"git fetch upstream --tags"$'\n'"git checkout strm"$'\n'"git rebase $L"$'\n'"# 手动解决冲突后："$'\n'"git add <冲突文件>"$'\n'"git rebase --continue"$'\n'"node --test strm-test/"$'\n'"git tag $STRMTAG"$'\n'"git push origin strm --force-with-lease"$'\n'"git push origin $STRMTAG"$'\n```'
+            BODY="$BODY"$'\n```bash\n'"cd abs-strm"$'\n'"git fetch upstream --tags"$'\n'"git checkout strm"$'\n'"git rebase $L"$'\n'"# 手动解决冲突后："$'\n'"git add <冲突文件>"$'\n'"git rebase --continue"$'\n'"node --test strm-test/*.test.js"$'\n'"git tag $STRMTAG"$'\n'"git push origin strm --force-with-lease"$'\n'"git push origin $STRMTAG"$'\n```'
             BODY="$BODY"$'\n\n'"推送后会自动构建并推送镜像 \`$VER\` + \`latest\`。"
             open_issue "⚠️ 自动更新冲突：官方 $L 需人工 rebase" "$BODY"
             exit 0
@@ -104,19 +111,31 @@ jobs:
 
           # 门禁：rebase 无冲突不代表 STRM 补丁的语义还成立（上游可能重构了扫描器、
           # 播放会话或 Stream 转码逻辑）。冒烟测试失败就回滚，绝不推送一个坏镜像。
-          if ! node --test strm-test/; then
+          if ! node --test strm-test/*.test.js; then
             git reset --hard "$BASE_SHA"
             echo "❌ rebase 到 $L 后 STRM 冒烟测试失败，已回滚到 $BASE_SHA，未推送"
-            BODY="rebase 到官方 \`$L\` **没有冲突**，但 STRM 冒烟测试（\`node --test strm-test/\`）失败，已自动回滚，strm 分支与镜像均未改动。"
+            BODY="rebase 到官方 \`$L\` **没有冲突**，但 STRM 冒烟测试（\`node --test strm-test/*.test.js\`）失败，已自动回滚，strm 分支与镜像均未改动。"
             BODY="$BODY"$'\n\n'"这通常意味着上游重构了 STRM 依赖的代码路径（扫描器 / PlaybackSessionManager / Stream / ffmpegHelpers）。"
-            BODY="$BODY"$'\n\n'"本地排查："$'\n```bash\n'"cd abs-strm"$'\n'"git fetch upstream --tags"$'\n'"git checkout strm"$'\n'"git rebase $L"$'\n'"node --test strm-test/"$'\n```'
+            BODY="$BODY"$'\n\n'"本地排查："$'\n```bash\n'"cd abs-strm"$'\n'"git fetch upstream --tags"$'\n'"git checkout strm"$'\n'"git rebase $L"$'\n'"node --test strm-test/*.test.js"$'\n```'
             open_issue "⚠️ STRM 冒烟测试失败：官方 $L" "$BODY"
             exit 0
           fi
 
           git tag "$STRMTAG"
-          git push origin strm --force-with-lease
-          git push origin "$STRMTAG"
+          if ! git push origin strm --force-with-lease; then
+            git tag -d "$STRMTAG" || true
+            echo "❌ 推送 strm 失败（分支保护 / 规则集 / 网络）"
+            BODY="rebase 到官方 \`$L\` 成功、冒烟测试也通过，但 **推送 strm 失败**，已删掉本地 tag，分支与镜像均未改动。"
+            BODY="$BODY"$'\n\n'"常见原因：分支保护或规则集禁止 force push、GITHUB_TOKEN 权限不足、GitHub 临时故障（\`fatal error in commit_refs_rules\` 就是后者，重跑即可）。"
+            BODY="$BODY"$'\n\n'"本地手动推送："$'\n```bash\n'"cd abs-strm"$'\n'"git fetch upstream --tags"$'\n'"git checkout strm"$'\n'"git rebase $L"$'\n'"node --test strm-test/*.test.js"$'\n'"git tag $STRMTAG"$'\n'"git push origin strm --force-with-lease"$'\n'"git push origin $STRMTAG"$'\n```'
+            open_issue "⚠️ 推送 strm 失败：官方 $L" "$BODY"
+            exit 0
+          fi
+          if ! git push origin "$STRMTAG"; then
+            echo "❌ tag 推送失败（分支已更新）"
+            open_issue "⚠️ 推送 tag 失败：$STRMTAG" "分支 strm 已更新到官方 \`$L\`，但 tag \`$STRMTAG\` 推送失败，镜像未构建。手动补推：\`git push origin $STRMTAG\`"
+            exit 0
+          fi
           sed -i "s/updated=false/updated=true/" "$GITHUB_OUTPUT"
           echo "🎉 已把定制改动更新到 $L 并打 tag $STRMTAG"
 
