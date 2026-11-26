@@ -541,3 +541,29 @@ The workflow normalises `strm-v2.37.2`, `2.37.2`, `v2.37.2` to `v2.37.2`; a fork
 
 > 预期 / Expectation：打开详情页 → 停 5~10 秒 → 点播放，首条应变成 `cache=hit`。
 > 若仍 `cache=miss`，看日志里 `Warming resume track on item open (pos=…)` 的 pos 与随后 `track/N` 是否对得上。
+### 14.4 两条长期红线：i18n 排序 & 集成测试
+
+**i18n（`Verify all i18n files are alphabetized`）**
+
+`audiobookshelf/audiobookshelf-i18n-updater@v1.3.0` 的规则很简单：每个 `client/strings/*.json` 的键必须满足 `keys[i] >= keys[i-1]`（**JS 默认字符串比较**，不是 `localeCompare`）。
+fork 的 UI 主题/首页模块字符串是**追加**在文件里的，顺序不对：
+
+```
+HeaderSettingsHomeModuleOrder / HeaderSettingsExperimental
+LabelSettingsHomeShowRecentSeries / LabelSettingsHomeShowDiscover
+LabelSettingsHomeModuleOrderHelp
+```
+
+→ 用同样的规则重排 `en-us.json` 与 `zh-cn.json`（各 14 行位移，**只动顺序不动值**），其他 40+ 语言文件本来就合规。
+
+**集成测试（`Integration Test` → `test if server is available`）**
+
+| 事实 | 值 |
+|---|---|
+| fork 的 `index.js` / `prod.js` 默认端口 | **2048** |
+| 工作流里 curl 的端口 | **3333** |
+
+所以二进制其实起来了，只是监听在 2048，curl 打 3333 必然失败——从 fork 第一个提交起就是红的。
+修法：job 里用 `PORT=3333 ./audiobookshelf &` 跑（不动 fork 的 2048 默认值），并把探活改成 20 秒重试，避免冷启动慢导致的偶发失败。
+
+> 结果 / Result：两条检查在提交 `27bdb0dd` 上**全部变绿**（Integration Test 是 fork 创建以来第一次通过）。
