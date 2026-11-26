@@ -44,10 +44,21 @@ jobs:
       - name: build binary
         run: pkg --config package.json -t node24-linux-x64 -o audiobookshelf dist-server/index.js
 
+      # STRM fork: index.js/prod.js default to PORT 2048 (upstream uses 3333).
+      # Pin the port here so this job keeps testing what it was written for.
       - name: run audiobookshelf
         run: |
-          ./audiobookshelf &
+          PORT=3333 ./audiobookshelf &
           sleep 5
 
       - name: test if server is available
-        run: curl -sf http://127.0.0.1:3333 | grep Audiobookshelf
+        run: |
+          for i in $(seq 1 20); do
+            if curl -sf http://127.0.0.1:3333 | grep -qi audiobookshelf; then
+              echo "server is up after ${i} attempt(s)"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "server did not come up on http://127.0.0.1:3333" >&2
+          exit 1
